@@ -111,7 +111,10 @@ LLAMA_STARTUP_TIMEOUT="${LLAMA_STARTUP_TIMEOUT:-180}"
 #   yourself reports supports_tools/supports_tool_calls: true at /props;
 #   otherwise tool calls silently stop working again.
 # - LLAMA_CHAT_TEMPLATE_FILE: path to a Jinja file passed via
-#   `--chat-template-file`; ignored when LLAMA_CHAT_TEMPLATE is set.
+#   `--chat-template-file`; ignored when LLAMA_CHAT_TEMPLATE is set. Set to
+#   an empty string to opt back into llama-server's own template selection
+#   (the model's embedded template, or its plain "chatml" fallback), which
+#   does not support tool calls but may be useful for troubleshooting.
 LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE:-}"
 LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE:-/opt/llama/chat-templates/tool-use-chatml.jinja}"
 LLAMA_EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
@@ -242,15 +245,25 @@ llama_args=(
 )
 
 if [[ -n "$LLAMA_CHAT_TEMPLATE" ]]; then
+  if [[ -n "$LLAMA_CHAT_TEMPLATE_FILE" && "$LLAMA_CHAT_TEMPLATE_FILE" != "/opt/llama/chat-templates/tool-use-chatml.jinja" ]]; then
+    echo "warning: both LLAMA_CHAT_TEMPLATE and LLAMA_CHAT_TEMPLATE_FILE are set;" >&2
+    echo "using --chat-template (LLAMA_CHAT_TEMPLATE) and ignoring LLAMA_CHAT_TEMPLATE_FILE=$LLAMA_CHAT_TEMPLATE_FILE" >&2
+  fi
   llama_args+=(--chat-template "$LLAMA_CHAT_TEMPLATE")
-else
+elif [[ -n "$LLAMA_CHAT_TEMPLATE_FILE" ]]; then
   if [[ ! -f "$LLAMA_CHAT_TEMPLATE_FILE" ]]; then
     echo "chat template file not found: $LLAMA_CHAT_TEMPLATE_FILE" >&2
-    echo "set LLAMA_CHAT_TEMPLATE_FILE or LLAMA_CHAT_TEMPLATE" >&2
+    echo "point LLAMA_CHAT_TEMPLATE_FILE at a valid file, unset it (or set it" >&2
+    echo "to an empty string) to use the model's default template, or set" >&2
+    echo "LLAMA_CHAT_TEMPLATE instead" >&2
     exit 1
   fi
   llama_args+=(--chat-template-file "$LLAMA_CHAT_TEMPLATE_FILE")
 fi
+# else: LLAMA_CHAT_TEMPLATE_FILE was explicitly set to "" to opt back into
+# llama-server's own template selection (the model's embedded template, or
+# its plain "chatml" fallback) — neither of which support tool calls, so
+# this is only useful for troubleshooting or non-tool-calling use cases.
 
 if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
   if [[ "$LLAMA_MCP_WORKSPACE" != /* ]]; then

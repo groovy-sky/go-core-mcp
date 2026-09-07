@@ -306,15 +306,19 @@ echo "    llama-server spawned coreutils-mcp over stdio and registered its tools
 # used so no port is ever published outside the container.
 echo "==> Verifying the bundled chat template reports tool-call support at /props"
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+props_startup_timeout=30
 "$CONTAINER_ENGINE" run -d \
   --name "$CONTAINER_NAME" \
   -v "$ROOT_DIR/scripts/testdata/chat-template-smoke-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
   -v "$WORK_DIR/output:/output" \
   -e LLAMA_CTX_SIZE=4096 \
-  -e LLAMA_STARTUP_TIMEOUT=30 \
+  -e LLAMA_STARTUP_TIMEOUT="$props_startup_timeout" \
   "$IMAGE_NAME" >/dev/null
 
-props_deadline=$((SECONDS + 60))
+# Add slack on top of LLAMA_STARTUP_TIMEOUT for container scheduling/model
+# loading overhead, so this deadline tracks the configured startup timeout
+# instead of a second, independently maintained constant.
+props_deadline=$((SECONDS + props_startup_timeout + 30))
 props_response=""
 until [[ -n "$props_response" ]]; do
   if (( SECONDS >= props_deadline )); then
@@ -332,17 +336,23 @@ until [[ -n "$props_response" ]]; do
   [[ -n "$props_response" ]] || sleep 1
 done
 
-if ! grep -q '"supports_tools":true' <<< "$props_response"; then
-  echo "FAIL: /props does not report chat_template_caps.supports_tools: true" >&2
+if ! props_caps="$(python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    caps = doc["chat_template_caps"]
+    ok = bool(caps.get("supports_tools")) and bool(caps.get("supports_tool_calls"))
+except Exception as exc:
+    print(f"error parsing /props: {exc}", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(caps))
+sys.exit(0 if ok else 1)
+' <<< "$props_response")"; then
+  echo "FAIL: /props does not report chat_template_caps.supports_tools/supports_tool_calls: true" >&2
   echo "$props_response" >&2
   exit 1
 fi
-if ! grep -q '"supports_tool_calls":true' <<< "$props_response"; then
-  echo "FAIL: /props does not report chat_template_caps.supports_tool_calls: true" >&2
-  echo "$props_response" >&2
-  exit 1
-fi
-echo "    /props reports chat_template_caps.supports_tools/supports_tool_calls: true"
+echo "    /props reports chat_template_caps: $props_caps"
 "$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
