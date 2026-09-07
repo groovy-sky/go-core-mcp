@@ -94,7 +94,7 @@ func TestHTTPHandlesFullLifecycle(t *testing.T) {
 		t.Fatalf("expected %d tools, got %d", len(server.ToolNames()), len(tools.Tools))
 	}
 
-	callResp := postJSON(t, httpServer.URL+DefaultHTTPPath, "", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"pwd","arguments":{}}}`)
+	callResp := postJSON(t, httpServer.URL+DefaultHTTPPath, "", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"coreutils_run","arguments":{"command":"wc","stdin":"one two\n"}}}`)
 	if callResp.StatusCode != http.StatusOK {
 		t.Fatalf("tools/call: expected 200, got %d", callResp.StatusCode)
 	}
@@ -107,14 +107,14 @@ func TestHTTPHandlesFullLifecycle(t *testing.T) {
 		t.Fatalf("decode call result: %v", err)
 	}
 	if callResult.IsError {
-		t.Fatalf("pwd call failed: %s", callResult.Text())
+		t.Fatalf("coreutils call failed: %s", callResult.Text())
 	}
 	body := map[string]any{}
 	if err := json.Unmarshal([]byte(callResult.Text()), &body); err != nil {
-		t.Fatalf("decode pwd payload: %v", err)
+		t.Fatalf("decode coreutils payload: %v", err)
 	}
 	if body["success"] != true {
-		t.Fatalf("expected pwd success, got %v", body)
+		t.Fatalf("expected coreutils success, got %v", body)
 	}
 }
 
@@ -251,10 +251,10 @@ func TestHTTPBearerSchemeIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestHTTPToolCallEnforcesWorkspaceProtection(t *testing.T) {
+func TestHTTPToolCallRejectsForbiddenCommand(t *testing.T) {
 	_, httpServer := newTestHTTPServer(t, HTTPOptions{})
 	resp := postJSON(t, httpServer.URL+DefaultHTTPPath, "",
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cat","arguments":{"path":"../escape.txt"}}}`)
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"coreutils_run","arguments":{"command":"cat","stdin":"ignored"}}}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -273,8 +273,8 @@ func TestHTTPToolCallEnforcesWorkspaceProtection(t *testing.T) {
 	if err := json.Unmarshal([]byte(callResult.Text()), &body); err != nil {
 		t.Fatalf("decode payload: %v", err)
 	}
-	if body["error"] != mcpproto.ErrorWorkspaceViolation {
-		t.Fatalf("expected workspace_violation, got %v", body["error"])
+	if body["error"] != mcpproto.ErrorPermissionDenied {
+		t.Fatalf("expected permission_denied, got %v", body["error"])
 	}
 }
 

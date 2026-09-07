@@ -79,37 +79,20 @@ There is no shell execution, no free-form command string, no write/mutate
 tools, and no long-running session state. Each run answers exactly one
 prompt and exits.
 
-## Supported MCP tools
+## Supported MCP tool
 
-The coreutils MCP server (`internal/mcpserver`) exposes exactly these
-read-only tools, each with a strict JSON-schema argument shape
-(`additionalProperties: false`, bounded string/array lengths):
+The MCP server exposes exactly one closed-schema tool, `coreutils_run`:
 
-| Tool        | Purpose                                             |
-|-------------|------------------------------------------------------|
-| `pwd`       | Print the logical workspace path                      |
-| `date`      | Print the current date/time (optionally UTC)          |
-| `cat`       | Read a bounded prefix of a workspace text file         |
-| `head`      | Read the first N lines of a workspace file             |
-| `tail`      | Read the last N lines of a workspace file               |
-| `wc`        | Count lines/words/bytes of a file or supplied text      |
-| `grep`      | Search a workspace file for a pattern (bounded matches)  |
-| `sha256sum` | Compute the SHA-256 digest of a workspace file          |
-| `basename`  | Strip directory/suffix from a path (string op, no I/O)  |
-| `dirname`   | Strip the last path component (string op, no I/O)       |
-| `base64`    | Encode/decode base64 text                                |
-| `cut`       | Select delimiter-separated fields from text              |
-| `paste`     | Merge several texts line by line                         |
-| `sort`      | Sort lines of supplied text                              |
-| `tr`        | Translate/delete characters in text                      |
-| `uniq`      | Remove adjacent duplicate lines                          |
+```json
+{"command":"sort","args":["--reverse"],"stdin":"pear\napple\n"}
+```
 
-Only a subset of the above (`AllowedTools` in `internal/agent/agent.go`) is
-ever exposed to the model, and only a profile-selected slice (≤6 tools) is
-sent per request. Write-capable coreutils
-(`cp`, `link`, `mkdir`, `rmdir`, `tee`, `touch`, `unlink`) are **not
-implemented** by the server at all (`mcpserver.WriteCapableTools` documents
-this policy so it is explicit and tested).
+It runs only approved, in-process, read-only text commands against the supplied
+stdin: `sort` (`-r`, `--reverse`, `-n`, `--numeric-sort`), `uniq` (`-c`,
+`--count`), `wc` (`-l`, `-w`, `-c`), `tr`, `head -n COUNT`, `tail -n COUNT`,
+and `cut -d DELIMITER -f FIELDS`. The response contains `command`, `stdout`,
+`stderr`, and `truncated`. Unknown commands and unsupported arguments are
+rejected before execution. The agent independently allowlists this same tool.
 
 ## Security boundaries
 
@@ -117,17 +100,11 @@ this policy so it is explicit and tested).
   schema-validated arguments; there is no `sh -c`, `exec.Command` with a
   shell, or string concatenation into a command line anywhere in the tool
   dispatch path.
-- **Workspace confinement.** All file tools resolve paths through
-  `internal/mcpserver/workspace.go`, which:
-  - rejects empty paths, NUL bytes, and absolute paths;
-  - rejects `..` traversal before and after `filepath.Clean`;
-  - resolves symlinks and re-checks the result stays inside the canonical,
-    symlink-resolved workspace root (blocking symlink escapes);
-  - reports safe, generic errors (no host path leakage).
-- **Bounded I/O.** File reads, hash inputs, grep matches, and tool results
-  all have fixed byte/line caps (`internal/mcpserver/server.go:
-  DefaultLimits`), so a single tool call cannot exhaust memory or the
-  model's context.
+- **No filesystem or network access.** The exposed utilities operate only on
+  supplied text; no command accepts a path or invokes a subprocess.
+- **Bounded I/O.** Input is capped at 64 KiB, each argument at 4 KiB (up to
+  32 arguments), stdout at 256 KiB, and every call is subject to the server
+  deadline.
 - **Allowlist, not trust-the-server.** The agent filters MCP `tools/list`
   results against its own hard-coded `AllowedTools`, so even if the MCP
   server were modified or replaced, the agent will not send unexpected

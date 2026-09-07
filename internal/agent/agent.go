@@ -40,14 +40,12 @@ Use tools when workspace data or an exact calculation is required.
 Never invent tool results.
 Call only listed tools.
 Use JSON arguments matching the tool schema.
-Use workspace-relative paths.
 After receiving results, answer concisely.
 Do not repeat large tool output unless requested.`
 
 // AllowedTools is the default read-only coreutils policy.
 var AllowedTools = []string{
-	"base64", "basename", "cat", "cut", "date", "dirname", "grep", "head",
-	"paste", "pwd", "sha256sum", "sort", "tail", "tr", "uniq", "wc",
+	"coreutils_run",
 }
 
 // Config holds the validated CLI configuration.

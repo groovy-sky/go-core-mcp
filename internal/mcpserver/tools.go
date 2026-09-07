@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,184 +41,48 @@ func stringField(description string, maxLength int) map[string]any {
 	return map[string]any{"type": "string", "description": description, "maxLength": maxLength}
 }
 
-func boolField(description string) map[string]any {
-	return map[string]any{"type": "boolean", "description": description}
-}
-
-func intField(description string, minimum, maximum int) map[string]any {
-	return map[string]any{"type": "integer", "description": description, "minimum": minimum, "maximum": maximum}
-}
-
-func pathField() map[string]any {
-	return stringField("Workspace-relative file path.", 512)
-}
-
-func textField() map[string]any {
-	return stringField("Input text (bounded).", 12<<10)
-}
-
 func definitions() []tool {
-	return []tool{
-		{
-			name:        "pwd",
-			description: "Print the logical workspace path.",
-			schema:      object(map[string]any{}),
-			run:         runPwd,
-		},
-		{
-			name:        "date",
-			description: "Print the current date and time.",
-			schema: object(map[string]any{
-				"utc": boolField("Use UTC instead of local time."),
-			}),
-			run: runDate,
-		},
-		{
-			name:        "cat",
-			description: "Read a bounded amount of a workspace text file.",
-			schema: object(map[string]any{
-				"path":      pathField(),
-				"max_bytes": intField("Maximum bytes to read.", 1, 12<<10),
-			}, "path"),
-			run: runCat,
-		},
-		{
-			name:        "head",
-			description: "Read the first lines of a workspace file.",
-			schema: object(map[string]any{
-				"path":  pathField(),
-				"lines": intField("Number of leading lines.", 1, 200),
-			}, "path"),
-			run: runHead,
-		},
-		{
-			name:        "tail",
-			description: "Read the last lines of a workspace file.",
-			schema: object(map[string]any{
-				"path":  pathField(),
-				"lines": intField("Number of trailing lines.", 1, 200),
-			}, "path"),
-			run: runTail,
-		},
-		{
-			name:        "wc",
-			description: "Count lines, words, and bytes of a file or text.",
-			schema: object(map[string]any{
-				"path": pathField(),
-				"text": textField(),
-			}),
-			run: runWC,
-		},
-		{
-			name:        "grep",
-			description: "Search a workspace file for a pattern; matches are limited.",
-			schema: object(map[string]any{
-				"path": pathField(),
-				"pattern": map[string]any{
-					"type":        "string",
-					"description": "Pattern to search for.",
-					"minLength":   1,
-					"maxLength":   256,
-				},
-				"ignore_case": boolField("Case-insensitive search."),
-				"fixed":       boolField("Treat the pattern as literal text."),
-				"max_matches": intField("Maximum number of matches.", 1, 20),
-			}, "path", "pattern"),
-			run: runGrep,
-		},
-		{
-			name:        "sha256sum",
-			description: "Compute the SHA-256 digest of a workspace file.",
-			schema:      object(map[string]any{"path": pathField()}, "path"),
-			run:         runSha256Sum,
-		},
-		{
-			name:        "basename",
-			description: "Strip the directory and an optional suffix from a path.",
-			schema: object(map[string]any{
-				"path":   stringField("Path to reduce.", 512),
-				"suffix": stringField("Optional suffix to remove.", 64),
-			}, "path"),
-			run: runBasename,
-		},
-		{
-			name:        "dirname",
-			description: "Strip the last component from a path.",
-			schema:      object(map[string]any{"path": stringField("Path to reduce.", 512)}, "path"),
-			run:         runDirname,
-		},
-		{
-			name:        "base64",
-			description: "Encode or decode base64 text.",
-			schema: object(map[string]any{
-				"text":   textField(),
-				"decode": boolField("Decode instead of encode."),
-			}, "text"),
-			run: runBase64,
-		},
-		{
-			name:        "cut",
-			description: "Select delimiter separated fields from each line.",
-			schema: object(map[string]any{
-				"text":      textField(),
-				"delimiter": stringField("Field delimiter.", 8),
-				"fields": map[string]any{
-					"type":        "array",
-					"description": "1-based field numbers.",
-					"items":       map[string]any{"type": "integer", "minimum": 1, "maximum": 1024},
-					"minItems":    1,
-					"maxItems":    16,
-				},
-			}, "text", "delimiter", "fields"),
-			run: runCut,
-		},
-		{
-			name:        "paste",
-			description: "Merge several texts line by line.",
-			schema: object(map[string]any{
-				"inputs": map[string]any{
-					"type":        "array",
-					"description": "Texts to merge.",
-					"items":       textField(),
-					"minItems":    1,
-					"maxItems":    4,
-				},
-				"delimiter": stringField("Column delimiter (default tab).", 8),
-			}, "inputs"),
-			run: runPaste,
-		},
-		{
-			name:        "sort",
-			description: "Sort the lines of the supplied text.",
-			schema: object(map[string]any{
-				"text":    textField(),
-				"reverse": boolField("Sort in descending order."),
-				"numeric": boolField("Compare lines numerically."),
-				"unique":  boolField("Drop duplicate lines."),
-			}, "text"),
-			run: runSort,
-		},
-		{
-			name:        "tr",
-			description: "Translate or delete characters in the supplied text.",
-			schema: object(map[string]any{
-				"text":   textField(),
-				"from":   stringField("Characters to translate or delete.", 256),
-				"to":     stringField("Replacement characters.", 256),
-				"delete": boolField("Delete the characters instead of translating."),
-			}, "text", "from"),
-			run: runTr,
-		},
-		{
-			name:        "uniq",
-			description: "Remove adjacent duplicate lines.",
-			schema: object(map[string]any{
-				"text":  textField(),
-				"count": boolField("Prefix each line with its repetition count."),
-			}, "text"),
-			run: runUniq,
-		},
+	return []tool{{
+		name:        "coreutils_run",
+		description: "Run an approved, read-only text utility on supplied stdin. Shell syntax and file paths are not supported.",
+		schema: object(map[string]any{
+			"command": stringField("Name of an approved core utility.", 32),
+			"args":    map[string]any{"type": "array", "description": "Validated utility arguments; shell syntax is not supported.", "items": stringField("Argument.", 4096), "maxItems": 32},
+			"stdin":   stringField("Optional UTF-8 text supplied to standard input.", 64<<10),
+		}, "command"),
+		run: runCoreutils,
+	}}
+}
+
+func runCoreutils(ctx context.Context, _ *Server, arguments map[string]any) (payload, error) {
+	name, err := requireString(arguments, "command")
+	if err != nil {
+		return payload{}, err
 	}
+	command, ok := coreutils.LookupCommand(name)
+	if !ok || !command.ExposeToMCP || !command.ReadOnly {
+		return payload{}, fail(mcpproto.ErrorPermissionDenied, "command %q is not permitted", name)
+	}
+	args := []string{}
+	if rawArgs, ok := arguments["args"].([]any); ok {
+		for _, raw := range rawArgs {
+			argument, ok := raw.(string)
+			if !ok {
+				return payload{}, fail(mcpproto.ErrorInvalidArguments, "args must contain only strings")
+			}
+			args = append(args, argument)
+		}
+	}
+	if err := command.ValidateArgs(args); err != nil {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "invalid arguments: %s", err)
+	}
+	stdin, _ := arguments["stdin"].(string)
+	var stdout, stderr bytes.Buffer
+	if err := command.Run(ctx, args, bytes.NewBufferString(stdin), &stdout, &stderr); err != nil {
+		return payload{}, err
+	}
+	output, truncated := clampResult(stdout.String(), 256<<10)
+	return payload{Truncated: truncated, Result: map[string]any{"success": true, "command": name, "stdout": output, "stderr": stderr.String(), "truncated": truncated}}, nil
 }
 
 func optionalBool(arguments map[string]any, key string) bool {

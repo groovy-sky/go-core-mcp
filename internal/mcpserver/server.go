@@ -59,6 +59,7 @@ type payload struct {
 	Output    string         `json:"output"`
 	Truncated bool           `json:"truncated"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
+	Result    map[string]any `json:"-"`
 }
 
 type tool struct {
@@ -224,10 +225,9 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 	result.Truncated = result.Truncated || truncated
 	s.logf("tool=%s duration=%s bytes=%d truncated=%t", definition.name, duration.Round(time.Millisecond), len(result.Output), result.Truncated)
 
-	body := map[string]any{
-		"success":   true,
-		"output":    result.Output,
-		"truncated": result.Truncated,
+	body := result.Result
+	if body == nil {
+		body = map[string]any{"success": true, "output": result.Output, "truncated": result.Truncated}
 	}
 	if len(result.Metadata) > 0 {
 		body["metadata"] = result.Metadata

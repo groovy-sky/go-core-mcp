@@ -14,7 +14,7 @@ const MaxExposedTools = 6
 // FallbackProfile is used when no profile matches confidently.
 var FallbackProfile = Profile{
 	Name:  "fallback",
-	Tools: []string{"pwd", "cat", "grep", "head", "tail", "wc"},
+	Tools: []string{"coreutils_run"},
 }
 
 // profiles are evaluated in this fixed order so selection is deterministic.
@@ -23,26 +23,23 @@ var profiles = []struct {
 	keywords []string
 }{
 	{
-		profile:  Profile{Name: "date", Tools: []string{"date"}},
+		profile:  Profile{Name: "date", Tools: []string{"coreutils_run"}},
 		keywords: []string{"date", "time", "clock", "timestamp", "today", "utc", "current time"},
 	},
 	{
-		profile:  Profile{Name: "file_search", Tools: []string{"pwd", "grep", "head", "wc"}},
+		profile:  Profile{Name: "file_search", Tools: []string{"coreutils_run"}},
 		keywords: []string{"grep", "search", "find occurrences", "occurrence", "occurrences", "matches", "matching", "pattern", "todo", "look for", "contains"},
 	},
 	{
-		profile:  Profile{Name: "file_inspection", Tools: []string{"pwd", "cat", "head", "tail", "wc", "sha256sum"}},
+		profile:  Profile{Name: "file_inspection", Tools: []string{"coreutils_run"}},
 		keywords: []string{"read", "show", "workspace", "readme", "file", "beginning", "summarize", "summary", "content", "contents", "checksum", "sha256", "hash", "inspect", "lines of", "print"},
 	},
 	{
-		profile:  Profile{Name: "path_processing", Tools: []string{"pwd", "basename", "dirname"}},
+		profile:  Profile{Name: "path_processing", Tools: []string{"coreutils_run"}},
 		keywords: []string{"basename", "dirname", "base name", "directory name", "path component", "strip the directory", "file extension"},
 	},
 	{
-		// PLAN.md lists seven text-processing tools; the per-request limit is
-		// six, so "paste" is dropped in favour of the tools needed by the
-		// acceptance tests.
-		profile:  Profile{Name: "text_processing", Tools: []string{"sort", "uniq", "wc", "cut", "tr", "base64"}},
+		profile:  Profile{Name: "text_processing", Tools: []string{"coreutils_run"}},
 		keywords: []string{"sort", "unique", "uniq", "duplicate", "base64", "encode", "decode", "translate characters", "fields", "column", "columns", "cut", "merge lines"},
 	},
 }

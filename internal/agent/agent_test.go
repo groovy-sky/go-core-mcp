@@ -102,12 +102,12 @@ func TestSelectProfileIsDeterministic(t *testing.T) {
 func TestFilterDiscoveredDeniesUnexpectedTools(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object"}`)
 	tools := []mcpproto.Tool{
-		{Name: "pwd", InputSchema: schema},
+		{Name: "coreutils_run", InputSchema: schema},
 		{Name: "unlink", InputSchema: schema},
 		{Name: "exec_command", InputSchema: schema},
 	}
 	kept := FilterDiscovered(tools, nil)
-	if _, ok := kept["pwd"]; !ok {
+	if _, ok := kept["coreutils_run"]; !ok {
 		t.Fatal("allowed tool was dropped")
 	}
 	if _, ok := kept["unlink"]; ok {
@@ -124,7 +124,7 @@ func TestLoopExecutesToolCallAndPrintsFinalAnswer(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 	model := &fakeModel{replies: []llm.Message{
-		{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("call-1", "head", `{"path":"README.md","lines":1}`)}},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("call-1", "coreutils_run", `{"command":"head","args":["-n","1"],"stdin":"hello\nworld\n"}`)}},
 		{Role: "assistant", Content: "The file starts with hello."},
 	}}
 	session, output := newSession(t, workspace, "Read the beginning of README.md and summarize it.", model)
@@ -159,7 +159,7 @@ func TestLoopExecutesToolCallAndPrintsFinalAnswer(t *testing.T) {
 
 func TestLoopStopsAtRoundLimit(t *testing.T) {
 	workspace := t.TempDir()
-	call := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("call-1", "pwd", `{}`)}}
+	call := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{toolCall("call-1", "coreutils_run", `{"command":"wc","stdin":""}`)}}
 	model := &fakeModel{replies: []llm.Message{call, call, call}}
 	session, output := newSession(t, workspace, "Show the current workspace path.", model)
 
@@ -186,13 +186,12 @@ func TestLoopRejectsInvalidToolCalls(t *testing.T) {
 	}{
 		{"unknown tool", toolCall("c1", "unlink", `{"path":"README.md"}`), mcpproto.ErrorUnknownTool},
 		{"non-exposed tool", toolCall("c1", "base64", `{"text":"hi"}`), mcpproto.ErrorUnknownTool},
-		{"non-object arguments", toolCall("c1", "cat", `"README.md"`), mcpproto.ErrorInvalidArguments},
-		{"schema violation", toolCall("c1", "cat", `{"path":"README.md","danger":true}`), mcpproto.ErrorInvalidArguments},
-		{"raised limit", toolCall("c1", "head", `{"path":"README.md","lines":100000}`), mcpproto.ErrorInvalidArguments},
-		{"path traversal", toolCall("c1", "cat", `{"path":"../../etc/passwd"}`), mcpproto.ErrorWorkspaceViolation},
-		{"absolute path", toolCall("c1", "cat", `{"path":"/etc/passwd"}`), mcpproto.ErrorWorkspaceViolation},
-		{"unsupported type", llm.ToolCall{ID: "c1", Type: "code", Function: llm.FunctionCall{Name: "cat"}}, mcpproto.ErrorInvalidArguments},
-		{"missing id", llm.ToolCall{Type: "function", Function: llm.FunctionCall{Name: "cat", Arguments: `{"path":"README.md"}`}}, mcpproto.ErrorInvalidArguments},
+		{"non-object arguments", toolCall("c1", "coreutils_run", `"text"`), mcpproto.ErrorInvalidArguments},
+		{"schema violation", toolCall("c1", "coreutils_run", `{"command":"sort","danger":true}`), mcpproto.ErrorInvalidArguments},
+		{"raised limit", toolCall("c1", "coreutils_run", `{"command":"head","args":["-n","100000"]}`), mcpproto.ErrorInvalidArguments},
+		{"forbidden command", toolCall("c1", "coreutils_run", `{"command":"cat"}`), mcpproto.ErrorPermissionDenied},
+		{"unsupported type", llm.ToolCall{ID: "c1", Type: "code", Function: llm.FunctionCall{Name: "coreutils_run"}}, mcpproto.ErrorInvalidArguments},
+		{"missing id", llm.ToolCall{Type: "function", Function: llm.FunctionCall{Name: "coreutils_run", Arguments: `{"command":"sort"}`}}, mcpproto.ErrorInvalidArguments},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -219,7 +218,7 @@ func TestToolCallBudgetIsEnforced(t *testing.T) {
 	exposed, _ := session.exposeProfile(SelectProfile(session.config.Prompt))
 
 	for index := 0; index < MaxTotalToolCalls+1; index++ {
-		message, err := session.runToolCall(context.Background(), exposed, toolCall("c", "pwd", `{}`), 1, index)
+		message, err := session.runToolCall(context.Background(), exposed, toolCall("c", "coreutils_run", `{"command":"wc","stdin":""}`), 1, index)
 		if err != nil {
 			t.Fatalf("runToolCall failed: %v", err)
 		}
