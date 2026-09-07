@@ -132,7 +132,7 @@ run_forwarding_case() {
     -v "$WORK_DIR/fake-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
     -v "$WORK_DIR/output:/output" \
     -e LLAMA_STARTUP_TIMEOUT=15 \
-    "${EXTRA_RUN_ENV[@]}" \
+    ${EXTRA_RUN_ENV[@]+"${EXTRA_RUN_ENV[@]}"} \
     "$IMAGE_NAME" "$@"
 
   if [[ ! -f "$WORK_DIR/output/forward-log.txt" ]]; then
@@ -252,12 +252,20 @@ echo "    serve-only container shut down cleanly on SIGTERM (exit $serve_exit)"
 # fails right after discovery, when it tries to load the placeholder model.
 echo "==> Verifying llama-server discovers the bundled coreutils MCP tools"
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+set +e
 discovery_log="$(timeout 120 "$CONTAINER_ENGINE" run --rm \
   --name "$CONTAINER_NAME" \
   -v "$WORK_DIR/fake-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
   -v "$WORK_DIR/output:/output" \
   -e LLAMA_STARTUP_TIMEOUT=15 \
-  "$IMAGE_NAME" 2>&1 || true)"
+  "$IMAGE_NAME" 2>&1)"
+discovery_status=$?
+set -e
+if (( discovery_status == 124 )); then
+  echo "FAIL: llama-server did not exit within the discovery timeout" >&2
+  echo "$discovery_log" >&2
+  exit 1
+fi
 
 if ! grep -qE "MCP warmup: 'coreutils' discovered [1-9][0-9]* tools" <<< "$discovery_log"; then
   echo "FAIL: llama-server did not discover any coreutils MCP tools" >&2

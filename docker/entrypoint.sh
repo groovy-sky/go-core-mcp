@@ -214,6 +214,12 @@ llama_args=(
 )
 
 if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
+  if [[ "$LLAMA_MCP_WORKSPACE" != /* ]]; then
+    echo "LLAMA_MCP_WORKSPACE must be an absolute path: $LLAMA_MCP_WORKSPACE" >&2
+    echo "llama-server spawns the MCP server itself, so a relative path would" >&2
+    echo "be resolved against llama-server's working directory." >&2
+    exit 1
+  fi
   if [[ "$LLAMA_MCP_WORKSPACE" == *[[:cntrl:]]* ]]; then
     echo "LLAMA_MCP_WORKSPACE must not contain control characters" >&2
     exit 1
