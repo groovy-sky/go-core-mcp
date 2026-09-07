@@ -42,7 +42,11 @@
 {{- '<|im_end|>\n' }}
 {%- for message in messages %}
     {%- if message.role == 'system' %}
-        {#- the first system message was already emitted above #}
+        {#- Only the leading message (messages[0], handled above) is treated
+           as *the* system prompt; any other system-role message here is
+           intentionally dropped rather than re-emitted, since ChatML has a
+           single leading system turn and llama.cpp/OpenAI-style callers
+           (including the Web UI) are not expected to send more than one. #}
     {%- elif message.role == 'user' %}
         {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' }}
     {%- elif message.role == 'assistant' %}
