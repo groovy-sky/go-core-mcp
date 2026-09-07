@@ -19,6 +19,12 @@ from `unsloth/Phi-4-mini-instruct-GGUF`, served locally by `llama-server`.
 The GGUF file is **never committed to git**; it is downloaded at
 build/run time (see below).
 
+The repository currently publishes two variants from the same Dockerfile:
+`ghcr.io/<owner>/groovy-agent:phi4-mini` and
+`ghcr.io/<owner>/groovy-agent:qwen3-8b`. Both are built through GitHub
+Actions by setting `DOWNLOAD_MODEL=1` and overriding the model
+URL/filename/name as needed.
+
 ## Architecture
 
 ```text
@@ -223,8 +229,10 @@ HF_TOKEN=... DOWNLOAD_MODEL_AT_BUILD=1 ./scripts/package-image.sh
 ```
 
 (`HF_TOKEN` is optional and only needed for gated/rate-limited downloads.)
-This produces a local image (`groovy-agent:local` by default) and saves a
-tarball to `output/groovy-agent.tar`.
+`MODEL_URL`, `MODEL_FILENAME`, and `MODEL_NAME` can also be overridden when
+building custom variants. The script produces a local image
+(`groovy-agent:local` by default) and saves a tarball to
+`output/groovy-agent.tar`.
 
 ### Build without downloading the model (mount it instead)
 
