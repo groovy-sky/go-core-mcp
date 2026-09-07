@@ -12,7 +12,11 @@
 #   3. Without a positional prompt, `docker/entrypoint.sh` does not invoke
 #      `groovy-agent` (which is a one-shot CLI and would fail with a usage
 #      error) and instead keeps llama-server serving its API until stopped.
-#   4. `docker run ... mcp` serves the bundled coreutils MCP tool set over the
+#   4. The real `llama-server` binary spawns the bundled `coreutils-mcp` over
+#      stdio from the entrypoint's `--mcp-servers-json` registration and
+#      discovers its tools (this happens before the model is loaded, so a
+#      placeholder model file is enough).
+#   5. `docker run ... mcp` serves the bundled coreutils MCP tool set over the
 #      MCP Streamable HTTP transport, independently of llama-server (which is
 #      not started in this mode), and completes a real `initialize` /
 #      `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
@@ -22,8 +26,8 @@
 # small deterministic stubs (a Python HTTP server that answers /health, and a
 # script that records argv) so no real LLM inference happens, no model
 # download is required, and no llama-server is ever exposed outside the
-# container (no `-p`/published ports are used). Test 4 uses the real
-# `coreutils-mcp` binary (no model/GPU/CPU inference is involved) and talks to
+# container (no `-p`/published ports are used). Tests 4 and 5 use the real
+# `coreutils-mcp` binary (no model/GPU/CPU inference is involved); test 5 talks to
 # it with `docker exec` so its HTTP port is never published outside the
 # container either.
 set -euo pipefail
@@ -71,12 +75,17 @@ cat > "$WORK_DIR/stub-llama-server" <<'EOF'
 #!/usr/bin/env python3
 """Deterministic stand-in for llama-server used by the smoke test.
 
-Ignores all CLI args and serves a minimal HTTP server that answers /health
+Records the CLI args it was started with (so the entrypoint's llama-server
+wiring can be asserted) and serves a minimal HTTP server that answers /health
 and /v1/models with HTTP 200 so docker/entrypoint.sh's readiness loop
 succeeds without requiring a real model, GPU, or CPU inference.
 """
 import http.server
 import os
+import sys
+
+with open("/output/llama-argv.txt", "w", encoding="utf-8") as fp:
+    fp.write("\n".join(sys.argv[1:]) + "\n")
 
 host = os.environ.get("LLAMA_SERVER_HOST", "127.0.0.1")
 port = int(os.environ.get("LLAMA_SERVER_PORT", "8080"))
@@ -113,7 +122,7 @@ touch "$WORK_DIR/fake-model.gguf"
 run_forwarding_case() {
   local case_name="$1"
   shift
-  rm -f "$WORK_DIR/output/forward-log.txt"
+  rm -f "$WORK_DIR/output/forward-log.txt" "$WORK_DIR/output/llama-argv.txt"
   echo "==> Verifying entrypoint startup/command forwarding ($case_name)"
   "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   timeout 60 "$CONTAINER_ENGINE" run --rm \
@@ -123,6 +132,7 @@ run_forwarding_case() {
     -v "$WORK_DIR/fake-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
     -v "$WORK_DIR/output:/output" \
     -e LLAMA_STARTUP_TIMEOUT=15 \
+    ${EXTRA_RUN_ENV[@]+"${EXTRA_RUN_ENV[@]}"} \
     "$IMAGE_NAME" "$@"
 
   if [[ ! -f "$WORK_DIR/output/forward-log.txt" ]]; then
@@ -131,6 +141,8 @@ run_forwarding_case() {
   fi
   echo "    forwarded argv: $(tr '\n' ' ' < "$WORK_DIR/output/forward-log.txt")"
 }
+
+EXTRA_RUN_ENV=()
 
 # The entrypoint provides container defaults before user-supplied agent flags and
 # prompt arguments.
@@ -147,6 +159,33 @@ if ! tail -n1 "$WORK_DIR/output/forward-log.txt" | grep -qx "test prompt"; then
   echo "FAIL: expected prompt to be forwarded" >&2
   exit 1
 fi
+
+# llama-server itself is started as an MCP client: the bundled read-only
+# coreutils server is registered with it over stdio, confined to the workspace.
+if ! grep -qx -- "--mcp-servers-json" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: expected llama-server to be started with --mcp-servers-json" >&2
+  exit 1
+fi
+if ! grep -q '"command":"/usr/local/bin/coreutils-mcp"' "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: expected the coreutils MCP server in the llama-server MCP config" >&2
+  exit 1
+fi
+if ! grep -q '"--workspace","/output"' "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: expected the MCP config to confine tools to the workspace" >&2
+  exit 1
+fi
+echo "    llama-server registers the bundled coreutils MCP server over stdio"
+
+# The registration is opt-out, so operators can start llama-server without any
+# tool set at all.
+EXTRA_RUN_ENV=(-e LLAMA_MCP_COREUTILS=0)
+run_forwarding_case "MCP registration disabled" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+if grep -qx -- "--mcp-servers-json" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_COREUTILS=0 must not register MCP servers" >&2
+  exit 1
+fi
+echo "    LLAMA_MCP_COREUTILS=0 starts llama-server without MCP servers"
 
 # Without a positional prompt there is nothing for the one-shot agent to do, so
 # the entrypoint must keep llama-server running as an API server instead of
@@ -202,6 +241,43 @@ case "$serve_exit" in
     ;;
 esac
 echo "    serve-only container shut down cleanly on SIGTERM (exit $serve_exit)"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+# The bundled llama.cpp build is itself an MCP client: it spawns the servers
+# listed in --mcp-servers-json over stdio and registers their tools before it
+# loads the model. Running the *real* llama-server against a placeholder model
+# file therefore exercises the full discovery handshake (initialize /
+# notifications/initialized / tools/list) against the real coreutils-mcp
+# binary, and still needs no model download, GPU, or inference: llama-server
+# fails right after discovery, when it tries to load the placeholder model.
+echo "==> Verifying llama-server discovers the bundled coreutils MCP tools"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+set +e
+discovery_log="$(timeout 120 "$CONTAINER_ENGINE" run --rm \
+  --name "$CONTAINER_NAME" \
+  -v "$WORK_DIR/fake-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
+  -v "$WORK_DIR/output:/output" \
+  -e LLAMA_STARTUP_TIMEOUT=15 \
+  "$IMAGE_NAME" 2>&1)"
+discovery_status=$?
+set -e
+if (( discovery_status == 124 )); then
+  echo "FAIL: llama-server did not exit within the discovery timeout" >&2
+  echo "$discovery_log" >&2
+  exit 1
+fi
+
+if ! grep -qE "MCP warmup: 'coreutils' discovered [1-9][0-9]* tools" <<< "$discovery_log"; then
+  echo "FAIL: llama-server did not discover any coreutils MCP tools" >&2
+  echo "$discovery_log" >&2
+  exit 1
+fi
+if ! grep -qE "Added [1-9][0-9]* MCP tools" <<< "$discovery_log"; then
+  echo "FAIL: llama-server did not register the discovered MCP tools" >&2
+  echo "$discovery_log" >&2
+  exit 1
+fi
+echo "    llama-server spawned coreutils-mcp over stdio and registered its tools"
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 # The `mcp` subcommand is a third, explicit deployment mode: it serves the
