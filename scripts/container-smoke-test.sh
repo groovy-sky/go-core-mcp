@@ -320,9 +320,11 @@ props_startup_timeout=30
   "$IMAGE_NAME" >/dev/null
 
 # Add slack on top of LLAMA_STARTUP_TIMEOUT for container scheduling/model
-# loading overhead, so this deadline tracks the configured startup timeout
-# instead of a second, independently maintained constant.
-props_deadline=$((SECONDS + props_startup_timeout + 30))
+# loading overhead (image pull/start latency observed in this test
+# environment is well under this), so this deadline tracks the configured
+# startup timeout instead of a second, independently maintained constant.
+props_deadline_slack_seconds=30
+props_deadline=$((SECONDS + props_startup_timeout + props_deadline_slack_seconds))
 props_response=""
 until [[ -n "$props_response" ]]; do
   if (( SECONDS >= props_deadline )); then
