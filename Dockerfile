@@ -60,6 +60,7 @@ COPY --from=go-builder /out/coreutils-mcp /usr/local/bin/coreutils-mcp
 COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/chat-templates/ /opt/llama/chat-templates/
 RUN test -x /opt/llama/llama-server \
     && chmod +x /usr/local/bin/entrypoint.sh \
     && mkdir -p /output

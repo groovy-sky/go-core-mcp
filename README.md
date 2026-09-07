@@ -308,7 +308,15 @@ Usage and limitations:
   `docker run ... mcp`. That standalone mode remains for external
   MCP-capable clients.
 - Tool calling requires a chat template with tool support; the entrypoint
-  always starts `llama-server` with `--jinja`.
+  always starts `llama-server` with `--jinja`. Neither the bundled
+  Phi-4-mini GGUF's own embedded chat template nor llama.cpp's plain
+  `chatml` `--chat-template` fallback render `tools`/`tool_calls`
+  (`GET /props` reports `chat_template_caps.supports_tools`/
+  `supports_tool_calls: false` for both), so without further action the
+  model free-generates pseudo-shell text like `coreutil_pwd --show-path`
+  instead of making a structured tool call. The entrypoint instead
+  defaults to a bundled tool-aware template — see
+  `LLAMA_CHAT_TEMPLATE_FILE` below.
 - MCP support in llama.cpp is marked experimental upstream, and enabling
   it limits CORS origins to localhost by default (see above).
 - Only the read-only coreutils tool set is registered. llama.cpp's own
@@ -453,7 +461,13 @@ This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
 - `docker run ... mcp` starts `coreutils-mcp --transport http` (and
   never `llama-server`), and completes a real `initialize` /
   `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
-  exchange against it over MCP Streamable HTTP.
+  exchange against it over MCP Streamable HTTP;
+- the real `llama-server` binary, started against a committed placeholder
+  GGUF (`scripts/testdata/chat-template-smoke-model.gguf` — a tiny,
+  randomly initialized model whose architecture/tokenizer are valid but
+  whose weights are never used to generate text), reports
+  `chat_template_caps.supports_tools`/`supports_tool_calls: true` at
+  `GET /props` with the bundled default `LLAMA_CHAT_TEMPLATE_FILE`.
 
 The llama-server/groovy-agent forwarding checks replace those two
 binaries inside the container with deterministic stub scripts (a
@@ -508,6 +522,23 @@ Container/`docker/entrypoint.sh` environment variables:
 - `LLAMA_STARTUP_TIMEOUT` (seconds, default `180`)
 - `LLAMA_EXTRA_ARGS` (space-separated extra `llama-server` flags; avoid
   values containing spaces, and never source this from untrusted input)
+- `LLAMA_CHAT_TEMPLATE_FILE` (default: a bundled tool-aware ChatML template,
+  `docker/chat-templates/tool-use-chatml.jinja`, passed via
+  `--chat-template-file`): the bundled Phi-4-mini GGUF's own embedded chat
+  template does not render `tools`/`tool_calls`, so `--jinja` alone cannot
+  produce structured tool calls (`GET /props` would report
+  `chat_template_caps.supports_tools`/`supports_tool_calls: false`); this
+  default template does, which was verified against the pinned llama.cpp
+  runtime (build 10481, commit 25ae3a9b3) with `GET /props` reporting both
+  as `true`. Ignored when `LLAMA_CHAT_TEMPLATE` is set.
+- `LLAMA_CHAT_TEMPLATE` (default unset; passed via `--chat-template`):
+  operator override taking a llama.cpp built-in template name (e.g.
+  `chatml` — note this one does **not** support tools) or raw Jinja source,
+  since `--jinja` is always set. Only set this to a template you have
+  personally verified reports `chat_template_caps.supports_tools`/
+  `supports_tool_calls: true` at `GET /props`; otherwise Web UI/API tool
+  calls silently stop working and the model reverts to free-generating
+  pseudo-shell text instead of invoking the registered MCP tools.
 - `LLAMA_REPEAT_PENALTY` / `LLAMA_REPEAT_LAST_N` / `LLAMA_PREDICT_LIMIT`:
   sampling guardrails that curb small-model repetition loops
 - `LLAMA_MCP_COREUTILS` (default `1`): register the bundled read-only
