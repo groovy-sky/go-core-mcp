@@ -1,0 +1,72 @@
+{#-
+  Tool-aware ChatML chat template.
+
+  The bundled Phi-4-mini GGUF embeds a chat template that only understands
+  `system`/`user`/`assistant` roles and a plain-text `tools` blob glued onto
+  the system message; it has no notion of `tool_calls` on assistant
+  messages or a `tool` role for results (see /props -> chat_template_caps
+  in the parent issue). llama.cpp's own "chatml" --chat-template fallback
+  (used when no override is given) is equally minimal and does not
+  reference `tools`/`tool_calls` either. With either of those, llama.cpp's
+  jinja-template capability probe reports `supports_tools: false` and
+  `supports_tool_calls: false`, so `--jinja` never emits a structured tool
+  call and the model instead free-generates pseudo-shell text.
+
+  This template renders the OpenAI-style `tools` list, `assistant`
+  `tool_calls`, and `tool` role results using the widely-used ChatML
+  `<tool_call>{"name": ..., "arguments": ...}</tool_call>` /
+  `<tool_response>...</tool_response>` convention, which is enough for
+  llama.cpp's autoparser to build a working tool-call grammar/parser for
+  *any* model, regardless of whether that model was fine-tuned on this
+  exact format (llama-server's Generic/autoparser tool-calling path is
+  designed for that). It is passed to llama-server with
+  `--chat-template-file` (see docker/entrypoint.sh).
+#}
+{{- bos_token }}
+{%- if messages[0].role == 'system' %}
+    {{- '<|im_start|>system\n' + messages[0].content }}
+{%- else %}
+    {{- '<|im_start|>system\nYou are a helpful assistant.' }}
+{%- endif %}
+{%- if tools %}
+    {{- '\n\nYou can call the following tools to help answer the user. For each call, return a json object with the tool name and arguments within <tool_call></tool_call> XML tags, for example:\n<tool_call>\n{"name": <tool-name>, "arguments": <args-json-object>}\n</tool_call>\n\nAvailable tools:\n<tools>\n' }}
+    {%- for tool in tools %}
+        {%- if tool.function is defined %}
+            {%- set tool = tool.function %}
+        {%- endif %}
+        {{- tool | tojson }}
+        {{- '\n' }}
+    {%- endfor %}
+    {{- '</tools>' }}
+{%- endif %}
+{{- '<|im_end|>\n' }}
+{%- for message in messages %}
+    {%- if message.role == 'system' %}
+        {#- the first system message was already emitted above #}
+    {%- elif message.role == 'user' %}
+        {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' }}
+    {%- elif message.role == 'assistant' %}
+        {{- '<|im_start|>assistant\n' }}
+        {%- if message.content %}
+            {{- message.content }}
+        {%- endif %}
+        {%- for tool_call in message.tool_calls %}
+            {%- if tool_call.function is defined %}
+                {%- set tool_call = tool_call.function %}
+            {%- endif %}
+            {{- '\n<tool_call>\n{"name": "' + tool_call.name + '", "arguments": ' }}
+            {%- if tool_call.arguments is string %}
+                {{- tool_call.arguments }}
+            {%- else %}
+                {{- tool_call.arguments | tojson }}
+            {%- endif %}
+            {{- '}\n</tool_call>' }}
+        {%- endfor %}
+        {{- '<|im_end|>\n' }}
+    {%- elif message.role == 'tool' %}
+        {{- '<|im_start|>tool\n<tool_response>\n' + message.content + '\n</tool_response><|im_end|>\n' }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+{%- endif %}

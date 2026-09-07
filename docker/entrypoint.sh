@@ -86,6 +86,34 @@ LLAMA_CTX_SIZE="${LLAMA_CTX_SIZE:-8192}"
 LLAMA_THREADS="${LLAMA_THREADS:-0}"
 LLAMA_N_GPU_LAYERS="${LLAMA_N_GPU_LAYERS:-0}"
 LLAMA_STARTUP_TIMEOUT="${LLAMA_STARTUP_TIMEOUT:-180}"
+
+# The bundled Phi-4-mini GGUF's own embedded chat template (and llama.cpp's
+# "chatml" --chat-template fallback) only understand plain
+# system/user/assistant turns: neither renders `tools`/`tool_calls`, so
+# llama-server's jinja capability probe (visible at GET /props ->
+# chat_template_caps) reports supports_tools/supports_tool_calls as false.
+# Without that, --jinja never emits a structured tool call and the model
+# free-generates pseudo-shell text like `coreutil_pwd --show-path` instead of
+# actually invoking the registered MCP tools from the Web UI.
+#
+# LLAMA_CHAT_TEMPLATE_FILE therefore defaults to a bundled ChatML-derived
+# template (docker/chat-templates/tool-use-chatml.jinja) that does render
+# tools/tool_calls/tool-role messages, which is enough for llama.cpp's
+# autoparser to build a working tool-call grammar for any model. This was
+# verified against the pinned llama.cpp runtime (build 10481, commit
+# 25ae3a9b3): GET /props reports chat_template_caps.supports_tools and
+# .supports_tool_calls as true with this template, and false with either the
+# model's own template or --chat-template chatml.
+#
+# - LLAMA_CHAT_TEMPLATE: operator override taking a literal `--chat-template`
+#   value (a llama.cpp built-in name, or raw Jinja source since --jinja is
+#   always set). Only override this with a template you have verified
+#   yourself reports supports_tools/supports_tool_calls: true at /props;
+#   otherwise tool calls silently stop working again.
+# - LLAMA_CHAT_TEMPLATE_FILE: path to a Jinja file passed via
+#   `--chat-template-file`; ignored when LLAMA_CHAT_TEMPLATE is set.
+LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE:-}"
+LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE:-/opt/llama/chat-templates/tool-use-chatml.jinja}"
 LLAMA_EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
 
 # Sampling/generation guardrails. These defaults exist to prevent small
@@ -212,6 +240,17 @@ llama_args=(
   --repeat-last-n "$LLAMA_REPEAT_LAST_N"
   --n-predict "$LLAMA_PREDICT_LIMIT"
 )
+
+if [[ -n "$LLAMA_CHAT_TEMPLATE" ]]; then
+  llama_args+=(--chat-template "$LLAMA_CHAT_TEMPLATE")
+else
+  if [[ ! -f "$LLAMA_CHAT_TEMPLATE_FILE" ]]; then
+    echo "chat template file not found: $LLAMA_CHAT_TEMPLATE_FILE" >&2
+    echo "set LLAMA_CHAT_TEMPLATE_FILE or LLAMA_CHAT_TEMPLATE" >&2
+    exit 1
+  fi
+  llama_args+=(--chat-template-file "$LLAMA_CHAT_TEMPLATE_FILE")
+fi
 
 if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
   if [[ "$LLAMA_MCP_WORKSPACE" != /* ]]; then

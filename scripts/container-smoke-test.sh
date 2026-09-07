@@ -21,6 +21,12 @@
 #      not started in this mode), and completes a real `initialize` /
 #      `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
 #      exchange against the actual `coreutils-mcp` binary.
+#   6. The bundled tool-aware chat template (docker/entrypoint.sh's default
+#      `--chat-template-file`) makes the real `llama-server` binary report
+#      `chat_template_caps.supports_tools`/`supports_tool_calls: true` at
+#      `GET /props`, using a tiny committed placeholder GGUF
+#      (scripts/testdata/chat-template-smoke-model.gguf) so no ~4GB model
+#      download or real text-generation inference is required.
 #
 # Test 2 replaces `llama-server` and `groovy-agent` inside the container with
 # small deterministic stubs (a Python HTTP server that answers /health, and a
@@ -29,7 +35,11 @@
 # container (no `-p`/published ports are used). Tests 4 and 5 use the real
 # `coreutils-mcp` binary (no model/GPU/CPU inference is involved); test 5 talks to
 # it with `docker exec` so its HTTP port is never published outside the
-# container either.
+# container either. Test 6 loads the real `llama-server` binary (also reached
+# only via `docker exec`, never a published port); its placeholder GGUF has a
+# valid tiny architecture/tokenizer so the server starts and answers
+# `/props`, but randomly initialized weights, so it is never used to
+# generate text.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -278,6 +288,62 @@ if ! grep -qE "Added [1-9][0-9]* MCP tools" <<< "$discovery_log"; then
   exit 1
 fi
 echo "    llama-server spawned coreutils-mcp over stdio and registered its tools"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+# The model's own embedded chat template (and llama.cpp's plain "chatml"
+# --chat-template fallback) do not render `tools`/`tool_calls`, so
+# llama-server's jinja capability probe reports supports_tools/
+# supports_tool_calls as false and the Web UI/API never receives a
+# structured tool call (see the issue this addresses). docker/entrypoint.sh
+# instead points --chat-template-file at a bundled tool-aware template by
+# default. This is verified deterministically, without downloading or
+# running inference against the real ~4GB Phi-4-mini GGUF, by loading the
+# real `llama-server` binary against a committed placeholder GGUF
+# (scripts/testdata/chat-template-smoke-model.gguf): a real but tiny/randomly
+# initialized model whose *tokenizer and architecture* are enough for
+# llama-server to start and answer GET /props, even though its untrained
+# weights make it useless for actual text generation. `docker exec curl` is
+# used so no port is ever published outside the container.
+echo "==> Verifying the bundled chat template reports tool-call support at /props"
+"$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+"$CONTAINER_ENGINE" run -d \
+  --name "$CONTAINER_NAME" \
+  -v "$ROOT_DIR/scripts/testdata/chat-template-smoke-model.gguf:/models/Phi-4-mini-instruct.Q8_0.gguf:ro" \
+  -v "$WORK_DIR/output:/output" \
+  -e LLAMA_CTX_SIZE=4096 \
+  -e LLAMA_STARTUP_TIMEOUT=30 \
+  "$IMAGE_NAME" >/dev/null
+
+props_deadline=$((SECONDS + 60))
+props_response=""
+until [[ -n "$props_response" ]]; do
+  if (( SECONDS >= props_deadline )); then
+    echo "FAIL: llama-server did not become ready to serve /props in time" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  if [[ "$("$CONTAINER_ENGINE" inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" != "true" ]]; then
+    echo "FAIL: llama-server container exited before serving /props" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  props_response="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" \
+    curl -fsS "http://127.0.0.1:8080/props" 2>/dev/null || true)"
+  [[ -n "$props_response" ]] || sleep 1
+done
+
+if ! grep -q '"supports_tools":true' <<< "$props_response"; then
+  echo "FAIL: /props does not report chat_template_caps.supports_tools: true" >&2
+  echo "$props_response" >&2
+  exit 1
+fi
+if ! grep -q '"supports_tool_calls":true' <<< "$props_response"; then
+  echo "FAIL: /props does not report chat_template_caps.supports_tool_calls: true" >&2
+  echo "$props_response" >&2
+  exit 1
+fi
+echo "    /props reports chat_template_caps.supports_tools/supports_tool_calls: true"
+"$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 # The `mcp` subcommand is a third, explicit deployment mode: it serves the
