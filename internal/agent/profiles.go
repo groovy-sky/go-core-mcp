@@ -31,7 +31,7 @@ var profiles = []struct {
 		keywords: []string{"grep", "search", "find occurrences", "occurrence", "occurrences", "matches", "matching", "pattern", "todo", "look for", "contains"},
 	},
 	{
-		profile:  Profile{Name: "file_inspection", Tools: []string{"coreutils_run"}},
+		profile:  Profile{Name: "file_inspection", Tools: []string{"pwd", "coreutils_run"}},
 		keywords: []string{"read", "show", "workspace", "readme", "file", "beginning", "summarize", "summary", "content", "contents", "checksum", "sha256", "hash", "inspect", "lines of", "print"},
 	},
 	{

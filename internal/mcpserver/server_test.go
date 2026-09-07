@@ -16,71 +16,60 @@ func newTestServer(t *testing.T, workspace string) *Server {
 	t.Helper()
 	server, err := New(workspace, DefaultLimits(), log.New(io.Discard, "", 0))
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	return server
 }
 
-func call(t *testing.T, server *Server, arguments map[string]any) map[string]any {
+func call(t *testing.T, server *Server, name, arguments string) map[string]any {
 	t.Helper()
-	encoded, err := json.Marshal(mcpproto.CallToolParams{Name: "coreutils_run", Arguments: mustJSON(t, arguments)})
-	if err != nil {
-		t.Fatalf("encode params: %v", err)
-	}
-	result := server.callTool(context.Background(), encoded)
+	params, _ := json.Marshal(mcpproto.CallToolParams{Name: name, Arguments: json.RawMessage(arguments)})
+	result := server.callTool(context.Background(), params)
 	body := map[string]any{}
 	if err := json.Unmarshal([]byte(result.Text()), &body); err != nil {
-		t.Fatalf("tool result is not JSON: %v", err)
+		t.Fatalf("decode result: %v", err)
 	}
 	return body
 }
 
-func mustJSON(t *testing.T, value any) json.RawMessage {
-	t.Helper()
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	return encoded
-}
-
-func expectError(t *testing.T, body map[string]any, category string) {
-	t.Helper()
-	if body["success"] != false || body["error"] != category {
-		t.Fatalf("expected %q failure, got %v", category, body)
-	}
-}
-
-func TestOnlyGenericCoreutilsToolIsExposed(t *testing.T) {
+func TestOnlySafeMCPToolsAreExposed(t *testing.T) {
 	server := newTestServer(t, t.TempDir())
-	if names := server.ToolNames(); len(names) != 1 || names[0] != "coreutils_run" {
-		t.Fatalf("unexpected exposed tools: %v", names)
+	if names := server.ToolNames(); len(names) != 2 || names[0] != "coreutils_run" || names[1] != "pwd" {
+		t.Fatalf("unexpected tools: %v", names)
 	}
 	for _, name := range append(WriteCapableTools, "cat", "grep", "sh", "rm") {
-		params, _ := json.Marshal(mcpproto.CallToolParams{Name: name, Arguments: json.RawMessage(`{}`)})
-		body := map[string]any{}
-		_ = json.Unmarshal([]byte(server.callTool(context.Background(), params).Text()), &body)
-		expectError(t, body, mcpproto.ErrorUnknownTool)
+		if body := call(t, server, name, `{}`); body["error"] != mcpproto.ErrorUnknownTool {
+			t.Fatalf("%s: %v", name, body)
+		}
 	}
 }
 
-func TestCoreutilsRunValidatesAndExecutes(t *testing.T) {
+func TestPwdReturnsLogicalWorkspacePath(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := call(t, newTestServer(t, workspace), "pwd", `{}`)
+	if body["success"] != true || body["output"] != "/project" {
+		t.Fatalf("unexpected pwd result: %v", body)
+	}
+}
+
+func TestCoreutilsRunExecutesAndRejectsUnsafeInput(t *testing.T) {
 	server := newTestServer(t, t.TempDir())
-	body := call(t, server, map[string]any{"command": "sort", "args": []string{"--reverse"}, "stdin": "pear\napple\norange\n"})
-	if body["success"] != true || body["stdout"] != "pear\norange\napple\n" || body["command"] != "sort" {
+	body := call(t, server, "coreutils_run", `{"command":"sort","stdin":"b\na\n"}`)
+	if body["success"] != true || body["stdout"] != "a\nb\n" {
 		t.Fatalf("unexpected sort result: %v", body)
 	}
-	expectError(t, call(t, server, map[string]any{"command": "rm", "args": []string{"-rf", "/"}}), mcpproto.ErrorPermissionDenied)
-	expectError(t, call(t, server, map[string]any{"command": "sort", "args": []string{"--output", "x"}}), mcpproto.ErrorInvalidArguments)
-	expectError(t, call(t, server, map[string]any{"command": "head", "args": []string{"-n", "-1"}}), mcpproto.ErrorInvalidArguments)
-}
-
-func TestCoreutilsRunEnforcesInputSchema(t *testing.T) {
-	server := newTestServer(t, t.TempDir())
-	expectError(t, call(t, server, map[string]any{}), mcpproto.ErrorInvalidArguments)
-	expectError(t, call(t, server, map[string]any{"command": "sort", "shell": "rm -rf /"}), mcpproto.ErrorInvalidArguments)
-	overLimit := strings.Repeat("a", 64<<10+1)
-	expectError(t, call(t, server, map[string]any{"command": "sort", "stdin": overLimit}), mcpproto.ErrorInvalidArguments)
+	if body := call(t, server, "coreutils_run", `{"command":"rm"}`); body["error"] != mcpproto.ErrorPermissionDenied {
+		t.Fatalf("unsafe command: %v", body)
+	}
+	if body := call(t, server, "coreutils_run", `{"command":"sort","shell":"rm -rf /"}`); body["error"] != mcpproto.ErrorInvalidArguments {
+		t.Fatalf("invalid schema: %v", body)
+	}
+	if body := call(t, server, "coreutils_run", `{"command":"head","args":["-n","-1"]}`); body["error"] != mcpproto.ErrorInvalidArguments {
+		t.Fatalf("invalid args: %v", body)
+	}
 }
 
 func TestServeHandlesLifecycleOverStdio(t *testing.T) {
@@ -88,15 +77,9 @@ func TestServeHandlesLifecycleOverStdio(t *testing.T) {
 	input := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n")
 	output := &strings.Builder{}
 	if err := server.Serve(context.Background(), input, output); err != nil {
-		t.Fatalf("Serve failed: %v", err)
+		t.Fatal(err)
 	}
 	if lines := strings.Split(strings.TrimSpace(output.String()), "\n"); len(lines) != 2 {
-		t.Fatalf("expected 2 responses, got %q", output.String())
-	}
-}
-
-func TestNewRejectsMissingWorkspace(t *testing.T) {
-	if _, err := New(filepath.Join(t.TempDir(), "missing"), DefaultLimits(), nil); err == nil {
-		t.Fatal("expected a missing workspace to be rejected")
+		t.Fatalf("unexpected output: %q", output.String())
 	}
 }

@@ -45,7 +45,7 @@ Do not repeat large tool output unless requested.`
 
 // AllowedTools is the default read-only coreutils policy.
 var AllowedTools = []string{
-	"coreutils_run",
+	"coreutils_run", "pwd",
 }
 
 // Config holds the validated CLI configuration.

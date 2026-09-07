@@ -42,16 +42,24 @@ func stringField(description string, maxLength int) map[string]any {
 }
 
 func definitions() []tool {
-	return []tool{{
-		name:        "coreutils_run",
-		description: "Run an approved, read-only text utility on supplied stdin. Shell syntax and file paths are not supported.",
-		schema: object(map[string]any{
-			"command": stringField("Name of an approved core utility.", 32),
-			"args":    map[string]any{"type": "array", "description": "Validated utility arguments; shell syntax is not supported.", "items": stringField("Argument.", 4096), "maxItems": 32},
-			"stdin":   stringField("Optional UTF-8 text supplied to standard input.", 64<<10),
-		}, "command"),
-		run: runCoreutils,
-	}}
+	return []tool{
+		{
+			name:        "pwd",
+			description: "Return the logical workspace path. This does not inspect the host filesystem.",
+			schema:      object(map[string]any{}),
+			run:         runPwd,
+		},
+		{
+			name:        "coreutils_run",
+			description: "Run an approved, read-only text utility on supplied stdin. Shell syntax and file paths are not supported.",
+			schema: object(map[string]any{
+				"command": stringField("Name of an approved core utility.", 32),
+				"args":    map[string]any{"type": "array", "description": "Validated utility arguments; shell syntax is not supported.", "items": stringField("Argument.", 4096), "maxItems": 32},
+				"stdin":   stringField("Optional UTF-8 text supplied to standard input.", 64<<10),
+			}, "command"),
+			run: runCoreutils,
+		},
+	}
 }
 
 func runCoreutils(ctx context.Context, _ *Server, arguments map[string]any) (payload, error) {
