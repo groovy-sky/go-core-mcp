@@ -115,6 +115,7 @@ LLAMA_STARTUP_TIMEOUT="${LLAMA_STARTUP_TIMEOUT:-180}"
 #   an empty string to opt back into llama-server's own template selection
 #   (the model's embedded template, or its plain "chatml" fallback), which
 #   does not support tool calls but may be useful for troubleshooting.
+llama_chat_template_file_was_set="${LLAMA_CHAT_TEMPLATE_FILE:+1}"
 LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE:-}"
 LLAMA_CHAT_TEMPLATE_FILE="${LLAMA_CHAT_TEMPLATE_FILE:-/opt/llama/chat-templates/tool-use-chatml.jinja}"
 LLAMA_EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
@@ -245,7 +246,7 @@ llama_args=(
 )
 
 if [[ -n "$LLAMA_CHAT_TEMPLATE" ]]; then
-  if [[ -n "$LLAMA_CHAT_TEMPLATE_FILE" && "$LLAMA_CHAT_TEMPLATE_FILE" != "/opt/llama/chat-templates/tool-use-chatml.jinja" ]]; then
+  if [[ -n "$llama_chat_template_file_was_set" ]]; then
     echo "warning: both LLAMA_CHAT_TEMPLATE and LLAMA_CHAT_TEMPLATE_FILE are set;" >&2
     echo "using --chat-template (LLAMA_CHAT_TEMPLATE) and ignoring LLAMA_CHAT_TEMPLATE_FILE=$LLAMA_CHAT_TEMPLATE_FILE" >&2
   fi

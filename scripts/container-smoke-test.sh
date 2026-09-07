@@ -305,6 +305,10 @@ echo "    llama-server spawned coreutils-mcp over stdio and registered its tools
 # weights make it useless for actual text generation. `docker exec curl` is
 # used so no port is ever published outside the container.
 echo "==> Verifying the bundled chat template reports tool-call support at /props"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "FAIL: python3 is required on the host to parse the /props response" >&2
+  exit 1
+fi
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 props_startup_timeout=30
 "$CONTAINER_ENGINE" run -d \
