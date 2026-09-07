@@ -94,6 +94,13 @@ and `cut -d DELIMITER -f FIELDS`. The response contains `command`, `stdout`,
 `stderr`, and `truncated`. Unknown commands and unsupported arguments are
 rejected before execution. The agent independently allowlists this same tool.
 
+It also exposes bounded workspace tools: `pwd`, `ls`, `cat`, `head`, `tail`,
+and `grep`. File management uses dedicated tools: `touch`, `mkdir`, `cp`,
+`mv`, `rm`, and `rmdir`. Copy is capped at 1 MiB, replacement requires an
+explicit `overwrite: true`, `rm` only removes one regular file, and `rmdir`
+only removes an empty directory. All paths are relative to the configured
+workspace; absolute paths, traversal, and symlink escapes are rejected.
+
 ## Security boundaries
 
 - **No shell execution.** Every tool is a Go function operating on parsed,

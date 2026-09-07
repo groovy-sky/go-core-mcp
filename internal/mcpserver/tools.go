@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/groovy-sky/groovy-agent/coreutils"
@@ -17,9 +19,13 @@ import (
 // maxHashBytes bounds sha256sum so hashing always fits the execution budget.
 const maxHashBytes = 1 << 20
 
-// WriteCapableTools are intentionally not implemented by this server. They are
-// listed so the policy is explicit and testable.
-var WriteCapableTools = []string{"cp", "link", "mkdir", "rmdir", "tee", "touch", "unlink"}
+// maxCopyBytes bounds copy operations so a single request cannot exhaust the
+// server's time or memory budget.
+const maxCopyBytes = 1 << 20
+
+// WriteCapableTools remain intentionally unavailable because they exceed the
+// narrowly scoped filesystem operations implemented by this server.
+var WriteCapableTools = []string{"link", "tee", "unlink"}
 
 func object(properties map[string]any, required ...string) map[string]any {
 	schema := map[string]any{
@@ -41,6 +47,18 @@ func stringField(description string, maxLength int) map[string]any {
 	return map[string]any{"type": "string", "description": description, "maxLength": maxLength}
 }
 
+func boolField(description string) map[string]any {
+	return map[string]any{"type": "boolean", "description": description}
+}
+
+func intField(description string, minimum, maximum int) map[string]any {
+	return map[string]any{"type": "integer", "description": description, "minimum": minimum, "maximum": maximum}
+}
+
+func pathField() map[string]any {
+	return stringField("Workspace-relative path.", 512)
+}
+
 func definitions() []tool {
 	return []tool{
 		{
@@ -48,6 +66,89 @@ func definitions() []tool {
 			description: "Return the logical workspace path. This does not inspect the host filesystem.",
 			schema:      object(map[string]any{}),
 			run:         runPwd,
+		},
+		{
+			name:        "ls",
+			description: "List entries in a workspace directory.",
+			schema: object(map[string]any{
+				"path": pathField(),
+			}),
+			run: runLS,
+		},
+		{
+			name:        "cat",
+			description: "Read a bounded workspace text file.",
+			schema: object(map[string]any{
+				"path":      pathField(),
+				"max_bytes": intField("Maximum bytes to read.", 1, 12<<10),
+			}, "path"),
+			run: runCat,
+		},
+		{
+			name:        "head",
+			description: "Read leading lines from a workspace file.",
+			schema: object(map[string]any{
+				"path": pathField(), "lines": intField("Number of lines.", 1, 200),
+			}, "path"),
+			run: runHead,
+		},
+		{
+			name:        "tail",
+			description: "Read trailing lines from a workspace file.",
+			schema: object(map[string]any{
+				"path": pathField(), "lines": intField("Number of lines.", 1, 200),
+			}, "path"),
+			run: runTail,
+		},
+		{
+			name:        "grep",
+			description: "Search a workspace text file for a pattern.",
+			schema: object(map[string]any{
+				"path": pathField(), "pattern": stringField("Pattern to search for.", 256),
+				"ignore_case": boolField("Case-insensitive search."), "fixed": boolField("Treat the pattern as literal text."),
+				"max_matches": intField("Maximum matches.", 1, 20),
+			}, "path", "pattern"),
+			run: runGrep,
+		},
+		{
+			name:        "touch",
+			description: "Create an empty workspace file or update its modification time.",
+			schema:      object(map[string]any{"path": pathField()}, "path"),
+			run:         runTouch,
+		},
+		{
+			name:        "mkdir",
+			description: "Create one workspace directory; parent directories must already exist.",
+			schema:      object(map[string]any{"path": pathField()}, "path"),
+			run:         runMkdir,
+		},
+		{
+			name:        "cp",
+			description: "Copy a bounded regular file within the workspace.",
+			schema: object(map[string]any{
+				"source": pathField(), "destination": pathField(), "overwrite": boolField("Replace an existing regular destination file."),
+			}, "source", "destination"),
+			run: runCopy,
+		},
+		{
+			name:        "mv",
+			description: "Move or rename a file or empty directory within the workspace.",
+			schema: object(map[string]any{
+				"source": pathField(), "destination": pathField(), "overwrite": boolField("Replace an existing destination."),
+			}, "source", "destination"),
+			run: runMove,
+		},
+		{
+			name:        "rm",
+			description: "Remove one regular file or symbolic link in the workspace. Directories are not removed.",
+			schema:      object(map[string]any{"path": pathField()}, "path"),
+			run:         runRemove,
+		},
+		{
+			name:        "rmdir",
+			description: "Remove one empty workspace directory. Recursive deletion is not supported.",
+			schema:      object(map[string]any{"path": pathField()}, "path"),
+			run:         runRemoveDirectory,
 		},
 		{
 			name:        "coreutils_run",
@@ -124,6 +225,182 @@ func runPwd(_ context.Context, s *Server, _ map[string]any) (payload, error) {
 		Output:   logical,
 		Metadata: map[string]any{"workspace": logical, "relative_root": "."},
 	}, nil
+}
+
+func runLS(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	relative, _ := arguments["path"].(string)
+	if relative == "" {
+		relative = "."
+	}
+	path, err := s.resolvePath(relative)
+	if err != nil {
+		return payload{}, err
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "directory could not be listed")
+	}
+	if len(entries) > 200 {
+		entries = entries[:200]
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			name += "/"
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return payload{Output: coreutils.JoinLines(names), Truncated: len(entries) == 200}, nil
+}
+
+func runTouch(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	relative, err := requireString(arguments, "path")
+	if err != nil {
+		return payload{}, err
+	}
+	path, err := s.resolveTouchPath(relative)
+	if err != nil {
+		return payload{}, err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return payload{}, fail(mcpproto.ErrorPermissionDenied, "file could not be touched")
+	}
+	if err := file.Close(); err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be touched")
+	}
+	if err := os.Chtimes(path, time.Now(), time.Now()); err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "file timestamp could not be updated")
+	}
+	return payload{Output: relative, Metadata: map[string]any{"path": relative}}, nil
+}
+
+func runMkdir(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	relative, err := requireString(arguments, "path")
+	if err != nil {
+		return payload{}, err
+	}
+	path, err := s.resolveTouchPath(relative)
+	if err != nil {
+		return payload{}, err
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		if os.IsExist(err) {
+			return payload{}, fail(mcpproto.ErrorInvalidArguments, "path already exists")
+		}
+		return payload{}, fail(mcpproto.ErrorToolError, "directory could not be created")
+	}
+	return payload{Output: relative, Metadata: map[string]any{"path": relative}}, nil
+}
+
+func runCopy(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	source, err := requireString(arguments, "source")
+	if err != nil {
+		return payload{}, err
+	}
+	destination, err := requireString(arguments, "destination")
+	if err != nil {
+		return payload{}, err
+	}
+	sourcePath, err := s.resolvePath(source)
+	if err != nil {
+		return payload{}, err
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxCopyBytes {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "source must be a regular file no larger than 1 MiB")
+	}
+	destinationPath, err := s.resolveTouchPath(destination)
+	if err != nil {
+		return payload{}, err
+	}
+	if sourcePath == destinationPath {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "source and destination must differ")
+	}
+	if _, err := os.Stat(destinationPath); err == nil && !optionalBool(arguments, "overwrite") {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "destination already exists; set overwrite to replace it")
+	}
+	input, err := os.Open(sourcePath)
+	if err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "source could not be read")
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "destination could not be written")
+	}
+	_, copyErr := io.Copy(output, input)
+	closeErr := output.Close()
+	if copyErr != nil || closeErr != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be copied")
+	}
+	return payload{Output: destination, Metadata: map[string]any{"source": source, "destination": destination}}, nil
+}
+
+func runMove(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	source, err := requireString(arguments, "source")
+	if err != nil {
+		return payload{}, err
+	}
+	destination, err := requireString(arguments, "destination")
+	if err != nil {
+		return payload{}, err
+	}
+	sourcePath, err := s.resolvePath(source)
+	if err != nil || sourcePath == s.workspace {
+		return payload{}, fail(mcpproto.ErrorWorkspaceViolation, "source path is not allowed")
+	}
+	destinationPath, err := s.resolveTouchPath(destination)
+	if err != nil {
+		return payload{}, err
+	}
+	if _, err := os.Lstat(destinationPath); err == nil && !optionalBool(arguments, "overwrite") {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "destination already exists; set overwrite to replace it")
+	}
+	if err := os.Rename(sourcePath, destinationPath); err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "path could not be moved")
+	}
+	return payload{Output: destination, Metadata: map[string]any{"source": source, "destination": destination}}, nil
+}
+
+func runRemove(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	relative, err := requireString(arguments, "path")
+	if err != nil {
+		return payload{}, err
+	}
+	path, err := s.resolvePath(relative)
+	if err != nil || path == s.workspace {
+		return payload{}, fail(mcpproto.ErrorWorkspaceViolation, "path is not allowed")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "path is not a regular file")
+	}
+	if err := os.Remove(path); err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be removed")
+	}
+	return payload{Output: relative, Metadata: map[string]any{"path": relative}}, nil
+}
+
+func runRemoveDirectory(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	relative, err := requireString(arguments, "path")
+	if err != nil {
+		return payload{}, err
+	}
+	path, err := s.resolvePath(relative)
+	if err != nil || path == s.workspace {
+		return payload{}, fail(mcpproto.ErrorWorkspaceViolation, "path is not allowed")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "path is not a directory")
+	}
+	if err := os.Remove(path); err != nil {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "directory must be empty")
+	}
+	return payload{Output: relative, Metadata: map[string]any{"path": relative}}, nil
 }
 
 func runDate(_ context.Context, _ *Server, arguments map[string]any) (payload, error) {

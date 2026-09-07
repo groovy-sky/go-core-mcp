@@ -66,6 +66,40 @@ func (s *Server) resolvePath(relative string) (string, error) {
 	return resolved, nil
 }
 
+// resolveTouchPath resolves an existing file or a new file beneath an existing
+// workspace directory. It rejects the same traversal and symlink escapes as
+// resolvePath before a write is attempted.
+func (s *Server) resolveTouchPath(relative string) (string, error) {
+	path, err := s.resolvePath(relative)
+	if err == nil {
+		return path, nil
+	}
+	var typed *toolError
+	if !errors.As(err, &typed) || typed.Category != mcpproto.ErrorToolError || typed.Message != "path does not exist" {
+		return "", err
+	}
+	if strings.TrimSpace(relative) == "" || strings.ContainsRune(relative, '\x00') || filepath.IsAbs(relative) {
+		return "", fail(mcpproto.ErrorWorkspaceViolation, "path is not allowed")
+	}
+	cleaned := filepath.Clean(relative)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fail(mcpproto.ErrorWorkspaceViolation, "path escapes the workspace")
+	}
+	parent, err := s.resolvePath(filepath.Dir(cleaned))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(parent)
+	if err != nil || !info.IsDir() {
+		return "", fail(mcpproto.ErrorInvalidArguments, "parent directory is not available")
+	}
+	path = filepath.Join(parent, filepath.Base(cleaned))
+	if !s.inside(path) {
+		return "", fail(mcpproto.ErrorWorkspaceViolation, "path escapes the workspace")
+	}
+	return path, nil
+}
+
 func (s *Server) inside(path string) bool {
 	if path == s.workspace {
 		return true
