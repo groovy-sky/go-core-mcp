@@ -104,6 +104,10 @@ LLAMA_STARTUP_TIMEOUT="${LLAMA_STARTUP_TIMEOUT:-180}"
 # 25ae3a9b3): GET /props reports chat_template_caps.supports_tools and
 # .supports_tool_calls as true with this template, and false with either the
 # model's own template or --chat-template chatml.
+# NOTE: if the pinned llama.cpp runtime (see the llama-runtime stage in
+# Dockerfile) is ever upgraded, re-verify this against the new build (start
+# the container, curl GET /props, check chat_template_caps) and update the
+# build/commit reference above accordingly.
 #
 # - LLAMA_CHAT_TEMPLATE: operator override taking a literal `--chat-template`
 #   value (a llama.cpp built-in name, or raw Jinja source since --jinja is
