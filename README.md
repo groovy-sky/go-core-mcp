@@ -45,7 +45,18 @@ This does **not** go through `llama-server` or the Go agent at all; it is
 a standalone deployment of the coreutils MCP server for clients that speak
 MCP natively (see [MCP server standalone mode](#mcp-server-standalone-mode)
 below).
+
+Inside the Docker image there is a third wiring: the bundled `llama-server`
+is itself an MCP client. It spawns the coreutils MCP server over stdio and
+exposes its tools to the chat flow (including its own Web UI), so no
+external MCP client is needed:
+
+```text
+Chat client / llama.cpp Web UI ──► llama-server ── stdio ──► coreutils MCP server
 ```
+
+See [Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
+below.
 
 The agent (`internal/agent`):
 
@@ -258,8 +269,69 @@ docker run --rm \
 
 The OpenAI-compatible API is then available at
 `http://127.0.0.1:8080/v1` on the host (model name
-`Phi-4-mini-instruct`). Note that `llama-server` allows all CORS origins
-and uses no API key, so only expose it on trusted networks.
+`Phi-4-mini-instruct`). `llama-server` uses no API key, so only expose it
+on trusted networks. Because the bundled coreutils MCP server is
+registered with it (see below), `llama-server` restricts CORS origins to
+localhost; pass `LLAMA_EXTRA_ARGS="--cors-origins <origin>"` if a browser
+served from another origin has to reach it, or disable the tool set with
+`LLAMA_MCP_COREUTILS=0`.
+
+### Coreutils tools inside llama.cpp
+
+The pinned `llama.cpp` build (`build 10481`, commit `25ae3a9b3`) is an MCP
+client itself: it spawns the MCP servers listed in `--mcp-servers-json`
+(Cursor-compatible format) over **stdio**, discovers their tools at
+startup and offers them to the model through its OpenAI-compatible tool
+calling, exposing them on its internal `GET /tools` endpoint that the
+built-in Web UI consumes.
+
+`docker/entrypoint.sh` therefore registers the bundled read-only
+`coreutils-mcp` binary with `llama-server` automatically whenever
+`llama-server` is started (both the API-server mode and the one-shot
+prompt mode). Nothing extra has to be started or published, and the
+startup logs show the discovery:
+
+```text
+srv start: MCP warmup: 'coreutils' discovered 16 tools
+srv setup: Added 16 MCP tools
+```
+
+The tools then appear in the built-in Web UI's tool list as
+`coreutils_pwd`, `coreutils_read_file`, ... and can be enabled per chat.
+
+Usage and limitations:
+
+- The tools are registered **server-side**. llama.cpp's Web UI still
+  cannot discover or connect to an MCP endpoint you type into it, and the
+  llama.cpp MCP client in this build supports the **stdio** transport
+  only — it cannot connect to the Streamable HTTP endpoint served by
+  `docker run ... mcp`. That standalone mode remains for external
+  MCP-capable clients.
+- Tool calling requires a chat template with tool support; the entrypoint
+  always starts `llama-server` with `--jinja`.
+- MCP support in llama.cpp is marked experimental upstream, and enabling
+  it limits CORS origins to localhost by default (see above).
+- Only the read-only coreutils tool set is registered. llama.cpp's own
+  built-in tools (`--tools`, which include `write_file` and
+  `exec_shell_command`) are deliberately **not** enabled, and every
+  registered tool stays confined to `LLAMA_MCP_WORKSPACE` (`/output` by
+  default), exactly as in the standalone `mcp` mode.
+- `llama-server` owns the lifetime of the MCP child process: it spawns it
+  on demand and shuts it down when it exits, so stopping the container
+  leaves nothing behind.
+- Set `LLAMA_MCP_COREUTILS=0` to start `llama-server` without any MCP tool
+  set, and `LLAMA_MCP_WORKSPACE=/some/dir` to confine the tools to a
+  different mounted directory.
+
+```sh
+docker run --rm \
+  -v "$(pwd)/artifacts/models:/models:ro" \
+  -v "$(pwd)/output:/output" \
+  -e LLAMA_MODEL_PATH=/models/Phi-4-mini-instruct.Q8_0.gguf \
+  -e LLAMA_MCP_WORKSPACE=/output \
+  -p 8080:8080 \
+  groovy-agent:local
+```
 
 ### Output persistence
 
@@ -294,11 +366,15 @@ docker run --rm \
 ```
 
 The MCP endpoint is then `http://127.0.0.1:8765/mcp` on the host. **Do
-not** point llama.cpp's built-in web UI at this endpoint: that UI is only
-an OpenAI-compatible chat client and has no concept of MCP servers, so it
-will never show or connect to `coreutils-mcp` no matter which port you
-give it. Instead, configure an MCP-capable client to connect directly to
-the Streamable HTTP endpoint, for example:
+not** point llama.cpp's built-in web UI at this endpoint: that UI cannot
+be told about an MCP server at runtime, and the llama.cpp MCP client in
+the pinned build speaks the stdio transport only, so it will never
+connect to this HTTP endpoint no matter which port you give it. To use
+the coreutils tools from llama.cpp, use the built-in registration
+described in
+[Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
+instead. For any other MCP-capable client, connect directly to the
+Streamable HTTP endpoint, for example:
 
 ```json
 {
@@ -364,9 +440,16 @@ This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
 - `docker/entrypoint.sh` starts llama-server, waits for it to become
   ready, and forwards the container command to `groovy-agent` with the
   bundled MCP server configured;
+- `llama-server` is started with the bundled coreutils MCP server
+  registered (`--mcp-servers-json`), confined to the workspace, and not
+  registered at all when `LLAMA_MCP_COREUTILS=0`;
 - without a positional prompt, the entrypoint does not invoke
   `groovy-agent` and keeps llama-server serving until the container is
   stopped;
+- the real `llama-server` binary spawns the real `coreutils-mcp` over
+  stdio and discovers its tools (`MCP warmup: 'coreutils' discovered N
+  tools`); this happens before the model is loaded, so a placeholder
+  model file is enough and no inference ever runs;
 - `docker run ... mcp` starts `coreutils-mcp --transport http` (and
   never `llama-server`), and completes a real `initialize` /
   `notifications/initialized` / `tools/list` / `tools/call` (`pwd`)
@@ -376,10 +459,11 @@ The llama-server/groovy-agent forwarding checks replace those two
 binaries inside the container with deterministic stub scripts (a
 minimal HTTP server that answers `/health`, and a script that records
 its argv), so no model, GPU, or CPU inference is required and no
-llama-server port is ever published outside the container. The `mcp`
-mode check instead runs the real `coreutils-mcp` binary (still no
-model/GPU/CPU inference is involved) and talks to it with `docker exec`,
-so its HTTP port is never published outside the container either. Set
+llama-server port is ever published outside the container. The MCP
+discovery check and the `mcp` mode check instead run the real
+`coreutils-mcp` binary (still no model/GPU/CPU inference is involved);
+the `mcp` mode check talks to it with `docker exec`, so its HTTP port is
+never published outside the container either. Set
 `CONTAINER_ENGINE=podman` to run it with Podman instead of Docker.
 
 ## Configuration / environment variables
@@ -426,6 +510,13 @@ Container/`docker/entrypoint.sh` environment variables:
   values containing spaces, and never source this from untrusted input)
 - `LLAMA_REPEAT_PENALTY` / `LLAMA_REPEAT_LAST_N` / `LLAMA_PREDICT_LIMIT`:
   sampling guardrails that curb small-model repetition loops
+- `LLAMA_MCP_COREUTILS` (default `1`): register the bundled read-only
+  coreutils MCP server with `llama-server` over stdio; set to `0` to
+  start `llama-server` without any MCP tool set
+- `LLAMA_MCP_WORKSPACE` (default `${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}`):
+  directory the registered MCP tools are confined to (see
+  [Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
+  above)
 - `AGENT_OUTPUT_DIR` (default `/output` in the container)
 - `MCP_HTTP_HOST` (default `0.0.0.0`), `MCP_HTTP_PORT` (default `8765`),
   `MCP_HTTP_PATH` (default `/mcp`), `MCP_HTTP_TOKEN` (default unset), and
@@ -502,10 +593,13 @@ so `GET`/`DELETE` (used for optional server-initiated streaming and
 session termination) are answered with `405 Method Not Allowed`, and
 batched JSON-RPC arrays are not supported.
 
-Note that **llama.cpp's own web UI cannot connect to this endpoint or
-any MCP server**: it is a chat UI for `llama-server`'s
-OpenAI-compatible API and has no MCP client support, so it will never
-list `coreutils-mcp` regardless of how this server is deployed.
+Note that **llama.cpp's own web UI cannot connect to this endpoint**: it
+has no way to be told about an MCP server at runtime, and the llama.cpp
+MCP client in the pinned build only spawns MCP servers over stdio from
+the server-side `--mcp-servers-json`/`--mcp-servers-config` flags. To use
+the coreutils tool set from llama.cpp, rely on the automatic stdio
+registration performed by the image
+([Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)).
 
 ## Removed / out of scope
 

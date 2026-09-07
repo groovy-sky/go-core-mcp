@@ -108,6 +108,30 @@ LLAMA_REPEAT_PENALTY="${LLAMA_REPEAT_PENALTY:-1.3}"
 LLAMA_REPEAT_LAST_N="${LLAMA_REPEAT_LAST_N:-256}"
 LLAMA_PREDICT_LIMIT="${LLAMA_PREDICT_LIMIT:-1024}"
 
+# The bundled llama.cpp build can act as an MCP client itself: it spawns the
+# MCP servers listed in --mcp-servers-json (Cursor-compatible format) over
+# stdio, discovers their tools at startup and exposes them to the chat flow
+# alongside its own tool set. Registering the read-only coreutils server here
+# is what makes its tools discoverable from llama.cpp (including its built-in
+# Web UI) without any external MCP client.
+#
+# - LLAMA_MCP_COREUTILS: set to 0 to start llama-server without the bundled
+#   MCP tool set.
+# - LLAMA_MCP_WORKSPACE: directory the registered tools are confined to; every
+#   tool call stays inside it, exactly as in the standalone `mcp` mode.
+LLAMA_MCP_COREUTILS="${LLAMA_MCP_COREUTILS:-1}"
+LLAMA_MCP_WORKSPACE="${LLAMA_MCP_WORKSPACE:-${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}}"
+
+# Escapes a string for embedding in a JSON string literal. Only backslashes
+# and double quotes need escaping for the filesystem paths used below;
+# control characters are rejected by the caller instead.
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
 # `groovy-agent` is a one-shot CLI: it requires a positional prompt and exits
 # with a usage error without one.  Mirror the Go flag package's parsing rules
 # closely enough to tell whether the container command contains a positional
@@ -188,6 +212,21 @@ llama_args=(
   --repeat-last-n "$LLAMA_REPEAT_LAST_N"
   --n-predict "$LLAMA_PREDICT_LIMIT"
 )
+
+if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
+  if [[ "$LLAMA_MCP_WORKSPACE" == *[[:cntrl:]]* ]]; then
+    echo "LLAMA_MCP_WORKSPACE must not contain control characters" >&2
+    exit 1
+  fi
+  mkdir -p "$LLAMA_MCP_WORKSPACE"
+  mcp_servers_json="$(printf '{"mcpServers":{"coreutils":{"command":"/usr/local/bin/coreutils-mcp","args":["--workspace","%s","--transport","stdio"]}}}' \
+    "$(json_escape "$LLAMA_MCP_WORKSPACE")")"
+  llama_args+=(--mcp-servers-json "$mcp_servers_json")
+  echo "registering bundled coreutils MCP server with llama-server (stdio)" >&2
+  echo "MCP tool workspace: ${LLAMA_MCP_WORKSPACE} (read-only tools)" >&2
+  echo "llama-server limits CORS origins to localhost while MCP servers are" >&2
+  echo "enabled; set LLAMA_MCP_COREUTILS=0 to start without the tool set." >&2
+fi
 
 if [[ -n "$LLAMA_EXTRA_ARGS" ]]; then
   read -r -a extra_args <<< "$LLAMA_EXTRA_ARGS"
