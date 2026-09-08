@@ -158,6 +158,32 @@ LLAMA_PREDICT_LIMIT="${LLAMA_PREDICT_LIMIT:-1024}"
 LLAMA_MCP_COREUTILS="${LLAMA_MCP_COREUTILS:-1}"
 LLAMA_MCP_WORKSPACE="${LLAMA_MCP_WORKSPACE:-${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}}"
 
+# llama-server's built-in Web UI has its own, separate MCP feature: from the
+# UI's Settings panel a user can register additional MCP servers directly in
+# the browser (e.g. remote HTTP/SSE servers), independent of the servers
+# registered server-side via --mcp-servers-json above. Because a browser
+# cannot open arbitrary cross-origin connections itself, that browser-side
+# feature relies on llama-server's `--ui-mcp-proxy` switch, which starts a
+# CORS proxy (the `/cors-proxy` endpoint) the Web UI's JavaScript uses to
+# reach those user-added servers.
+#
+# `--ui-mcp-proxy` is unrelated to whether the *bundled* coreutils server is
+# usable: since that one is registered server-side via --mcp-servers-json,
+# llama-server spawns and talks to it itself over stdio (never through a
+# browser), and its tools are already discovered and exposed at `GET /tools`
+# regardless of this flag; the Web UI's agentic tool-calling flow already
+# picks them up from there. This mirrors groovy-sky/local-ai's llama.cpp
+# runtime configuration (LLAMA_ARG_UI_MCP_PROXY=true) so the same Web UI MCP
+# surface (adding further MCP servers from the browser) is available here
+# too, without weakening the workspace confinement of the bundled coreutils
+# tools or enabling llama.cpp's separate built-in unsafe `--tools` feature.
+#
+# - LLAMA_MCP_UI_PROXY: set to 0 to start llama-server without
+#   `--ui-mcp-proxy` even though the bundled coreutils MCP server is still
+#   registered (LLAMA_MCP_COREUTILS=0 already implies this, since the flag is
+#   only ever added alongside that registration below).
+LLAMA_MCP_UI_PROXY="${LLAMA_MCP_UI_PROXY:-1}"
+
 # Escapes a string for embedding in a JSON string literal. Only backslashes
 # and double quotes need escaping for the filesystem paths used below;
 # control characters are rejected by the caller instead.
@@ -289,6 +315,15 @@ if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
   echo "MCP tool workspace: ${LLAMA_MCP_WORKSPACE} (read-only tools)" >&2
   echo "llama-server limits CORS origins to localhost while MCP servers are" >&2
   echo "enabled; set LLAMA_MCP_COREUTILS=0 to start without the tool set." >&2
+
+  if [[ "$LLAMA_MCP_UI_PROXY" != "0" ]]; then
+    llama_args+=(--ui-mcp-proxy)
+    echo "enabling llama-server's Web UI MCP CORS proxy (--ui-mcp-proxy);" >&2
+    echo "set LLAMA_MCP_UI_PROXY=0 to start without it (the bundled" >&2
+    echo "coreutils tools stay available either way; this only lets the" >&2
+    echo "Web UI's browser JavaScript reach further MCP servers added from" >&2
+    echo "its Settings panel)." >&2
+  fi
 fi
 
 if [[ -n "$LLAMA_EXTRA_ARGS" ]]; then
