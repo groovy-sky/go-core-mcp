@@ -15,7 +15,10 @@
 #   4. The real `llama-server` binary spawns the bundled `coreutils-mcp` over
 #      stdio from the entrypoint's `--mcp-servers-json` registration and
 #      discovers its tools (this happens before the model is loaded, so a
-#      placeholder model file is enough).
+#      placeholder model file is enough), and is also started with
+#      `--ui-mcp-proxy` (mirroring groovy-sky/local-ai's
+#      `LLAMA_ARG_UI_MCP_PROXY=true`) so its Web UI can reach further,
+#      browser-added MCP servers.
 #   5. `docker run ... mcp` serves the bundled coreutils MCP tool set over the
 #      MCP Streamable HTTP transport, independently of llama-server (which is
 #      not started in this mode), and completes a real `initialize` /
@@ -24,7 +27,8 @@
 #   6. The bundled tool-aware chat template (docker/entrypoint.sh's default
 #      `--chat-template-file`) makes the real `llama-server` binary report
 #      `chat_template_caps.supports_tools`/`supports_tool_calls: true` at
-#      `GET /props`, using a tiny committed placeholder GGUF
+#      `GET /props`, and its `/cors-proxy` endpoint confirms `--ui-mcp-proxy`
+#      is actually active, using a tiny committed placeholder GGUF
 #      (scripts/testdata/chat-template-smoke-model.gguf) so no ~4GB model
 #      download or real text-generation inference is required.
 #
@@ -186,6 +190,44 @@ if ! grep -q '"--workspace","/output"' "$WORK_DIR/output/llama-argv.txt"; then
 fi
 echo "    llama-server registers the bundled coreutils MCP server over stdio"
 
+# Alongside the server-side MCP registration, llama-server is also started
+# with its own Web UI MCP CORS proxy (--ui-mcp-proxy) by default, mirroring
+# groovy-sky/local-ai's LLAMA_ARG_UI_MCP_PROXY=true. This lets the Web UI's
+# browser JavaScript reach any *further* MCP servers a user registers from
+# its Settings panel; the bundled coreutils tools above are unaffected either
+# way, since llama-server talks to that one directly over stdio, never
+# through a browser.
+if ! grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: expected llama-server to be started with --ui-mcp-proxy" >&2
+  exit 1
+fi
+echo "    llama-server enables the Web UI MCP CORS proxy (--ui-mcp-proxy)"
+
+# --ui-mcp-proxy must never be added without --tools or by weakening
+# confinement: it must not be present when llama.cpp's separate, unsafe
+# built-in tools feature would be enabled (it is never enabled by this
+# entrypoint).
+if grep -qx -- "--tools" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: entrypoint must never enable llama.cpp's built-in --tools" >&2
+  exit 1
+fi
+
+# --ui-mcp-proxy has its own opt-out, independent of the coreutils
+# registration, so operators can keep the bundled tools but disable the
+# browser-facing CORS proxy.
+EXTRA_RUN_ENV=(-e LLAMA_MCP_UI_PROXY=0)
+run_forwarding_case "MCP UI proxy disabled" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+if ! grep -qx -- "--mcp-servers-json" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_UI_PROXY=0 must not disable the coreutils MCP server" >&2
+  exit 1
+fi
+if grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_UI_PROXY=0 must not add --ui-mcp-proxy" >&2
+  exit 1
+fi
+echo "    LLAMA_MCP_UI_PROXY=0 keeps the coreutils MCP server without --ui-mcp-proxy"
+
 # The registration is opt-out, so operators can start llama-server without any
 # tool set at all.
 EXTRA_RUN_ENV=(-e LLAMA_MCP_COREUTILS=0)
@@ -195,7 +237,11 @@ if grep -qx -- "--mcp-servers-json" "$WORK_DIR/output/llama-argv.txt"; then
   echo "FAIL: LLAMA_MCP_COREUTILS=0 must not register MCP servers" >&2
   exit 1
 fi
-echo "    LLAMA_MCP_COREUTILS=0 starts llama-server without MCP servers"
+if grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
+  echo "FAIL: LLAMA_MCP_COREUTILS=0 must not add --ui-mcp-proxy either" >&2
+  exit 1
+fi
+echo "    LLAMA_MCP_COREUTILS=0 starts llama-server without MCP servers or the UI proxy"
 
 # Without a positional prompt there is nothing for the one-shot agent to do, so
 # the entrypoint must keep llama-server running as an API server instead of
@@ -288,6 +334,17 @@ if ! grep -qE "Added [1-9][0-9]* MCP tools" <<< "$discovery_log"; then
   exit 1
 fi
 echo "    llama-server spawned coreutils-mcp over stdio and registered its tools"
+
+# --ui-mcp-proxy is passed alongside --mcp-servers-json by default (see
+# docker/entrypoint.sh); confirm the real llama-server binary accepts it and
+# reports the feature as enabled, rather than only asserting the argv wiring
+# against the deterministic stub above.
+if ! grep -q "MCP proxy (experimental)" <<< "$discovery_log"; then
+  echo "FAIL: llama-server did not report the MCP proxy (--ui-mcp-proxy) as enabled" >&2
+  echo "$discovery_log" >&2
+  exit 1
+fi
+echo "    llama-server enabled the Web UI MCP CORS proxy (--ui-mcp-proxy)"
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 # The model's own embedded chat template (and llama.cpp's plain "chatml"
@@ -359,6 +416,21 @@ sys.exit(0 if ok else 1)
   exit 1
 fi
 echo "    /props reports chat_template_caps: $props_caps"
+
+# --ui-mcp-proxy makes llama-server serve a `/cors-proxy` endpoint for the Web
+# UI's own MCP-over-browser feature; a disabled proxy answers 403 there (see
+# LLAMA_MCP_UI_PROXY=0 in docker/entrypoint.sh), while an enabled one accepts
+# the request path and fails later for unrelated reasons (e.g. a missing/
+# invalid target), so any non-403 status is enough to confirm the capability
+# is actually wired up in the real binary, without needing a real upstream
+# MCP server to proxy to.
+cors_proxy_status="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" \
+  curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080/cors-proxy" 2>/dev/null || true)"
+if [[ "$cors_proxy_status" == "403" || -z "$cors_proxy_status" ]]; then
+  echo "FAIL: /cors-proxy reported status '$cors_proxy_status'; expected --ui-mcp-proxy to be enabled" >&2
+  exit 1
+fi
+echo "    /cors-proxy responds (status $cors_proxy_status), confirming --ui-mcp-proxy is enabled"
 "$CONTAINER_ENGINE" stop -t 15 "$CONTAINER_NAME" >/dev/null 2>&1 || true
 "$CONTAINER_ENGINE" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 

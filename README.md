@@ -285,12 +285,27 @@ The tools then appear in the built-in Web UI's tool list as
 
 Usage and limitations:
 
-- The tools are registered **server-side**. llama.cpp's Web UI still
-  cannot discover or connect to an MCP endpoint you type into it, and the
-  llama.cpp MCP client in this build supports the **stdio** transport
-  only — it cannot connect to the Streamable HTTP endpoint served by
-  `docker run ... mcp`. That standalone mode remains for external
-  MCP-capable clients.
+- The tools are registered **server-side**: `llama-server` spawns and talks
+  to the bundled `coreutils-mcp` over stdio itself and exposes what it
+  discovers on `GET /tools`, so the model (and the built-in Web UI, which
+  reads that same endpoint) can call these tools without the browser ever
+  reaching the MCP server directly. `llama-server`'s own MCP client in this
+  build supports the **stdio** transport only — it cannot connect to the
+  Streamable HTTP endpoint served by `docker run ... mcp`. That standalone
+  mode remains for external MCP-capable clients.
+- The entrypoint also starts `llama-server` with `--ui-mcp-proxy` by
+  default, mirroring `groovy-sky/local-ai`'s
+  `LLAMA_ARG_UI_MCP_PROXY=true`. This is a separate, Web-UI-only feature:
+  it starts a `/cors-proxy` endpoint so the Web UI's own browser
+  JavaScript can reach *additional* MCP servers a user registers directly
+  from its Settings panel (something a browser cannot otherwise do
+  cross-origin). It has no effect on the bundled `coreutils-mcp`
+  registration above — that one is discovered and exposed the same way
+  with or without `--ui-mcp-proxy` — but is enabled by default for parity
+  with the reference `local-ai` configuration and so the Web UI's MCP
+  Settings panel is fully usable out of the box. Set
+  `LLAMA_MCP_UI_PROXY=0` to start `llama-server` without it while keeping
+  the bundled coreutils tools.
 - Tool calling requires a chat template with tool support; the entrypoint
   always starts `llama-server` with `--jinja`. Neither the bundled
   Phi-4-mini GGUF's own embedded chat template nor llama.cpp's plain
@@ -527,7 +542,17 @@ Container/`docker/entrypoint.sh` environment variables:
   sampling guardrails that curb small-model repetition loops
 - `LLAMA_MCP_COREUTILS` (default `1`): register the bundled read-only
   coreutils MCP server with `llama-server` over stdio; set to `0` to
-  start `llama-server` without any MCP tool set
+  start `llama-server` without any MCP tool set (this also implies no
+  `--ui-mcp-proxy`, since it is only ever added alongside this
+  registration)
+- `LLAMA_MCP_UI_PROXY` (default `1`, only relevant when
+  `LLAMA_MCP_COREUTILS` is enabled): start `llama-server` with
+  `--ui-mcp-proxy`, letting the built-in Web UI's browser JavaScript reach
+  further MCP servers registered from its own Settings panel; set to `0`
+  to keep the bundled coreutils tools without this separate, Web-UI-only
+  feature (see
+  [Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
+  above)
 - `LLAMA_MCP_WORKSPACE` (default `${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}`):
   directory the registered MCP tools are confined to (see
   [Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
