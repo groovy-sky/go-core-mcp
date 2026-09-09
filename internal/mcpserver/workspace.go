@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/groovy-sky/groovy-agent/internal/mcpproto"
 )
@@ -155,6 +156,19 @@ func (s *Server) readFile(relative string, limit int) (string, bool, error) {
 		truncated = true
 	}
 	return string(buffer[:count]), truncated, nil
+}
+
+// readTextFile reads a bounded regular file and rejects non-text content so
+// binary bytes never reach the model output path.
+func (s *Server) readTextFile(relative string, limit int) (string, bool, error) {
+	content, truncated, err := s.readFile(relative, limit)
+	if err != nil {
+		return "", false, err
+	}
+	if strings.ContainsRune(content, '\x00') || !utf8.ValidString(content) {
+		return "", false, fail(mcpproto.ErrorInvalidArguments, "file is not valid UTF-8 text")
+	}
+	return content, truncated, nil
 }
 
 // requireText extracts a bounded text argument.

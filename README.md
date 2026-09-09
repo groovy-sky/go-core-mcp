@@ -2,12 +2,13 @@
 
 A minimal, reliable Go agent that answers a single prompt using a local
 [`llama.cpp`](https://github.com/ggml-org/llama.cpp) `llama-server` and a
-bounded set of **read-only coreutils tools** exposed over the
+bounded set of **workspace and text tools** exposed over the
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
 
 The design intentionally has no non-coreutils integrations: no network
 fetch, no browser, no GitHub/cloud APIs, no package management, no shell
-string execution, and no file-write tools. See
+string execution, and no arbitrary command runner or unrestricted file
+mutation. See
 [Architecture](#architecture) and [Security boundaries](#security-boundaries)
 below for the exact guarantees.
 
@@ -33,7 +34,7 @@ Go CLI agent (cmd/agent)
 ```
 
 `cmd/coreutils-mcp` can alternatively be run in a second, independent
-mode that serves the same read-only tool set over the network for any
+mode that serves the same bounded tool set over the network for any
 remote MCP-compatible client, instead of being spawned as the agent's
 stdio child process:
 
@@ -75,11 +76,11 @@ The agent (`internal/agent`):
    final answer or the round budget is spent.
 6. Prints the final answer to stdout; all diagnostics go to stderr.
 
-There is no shell execution, no free-form command string, no write/mutate
-tools, and no long-running session state. Each run answers exactly one
-prompt and exits.
+There is no shell execution, no free-form command string, and no
+long-running session state. All filesystem access goes through dedicated,
+workspace-confined tools. Each run answers exactly one prompt and exits.
 
-## Supported MCP tool
+## Supported MCP tools
 
 The MCP server exposes exactly one closed-schema tool, `coreutils_run`:
 
@@ -94,10 +95,27 @@ and `cut -d DELIMITER -f FIELDS`. The response contains `command`, `stdout`,
 `stderr`, and `truncated`. Unknown commands and unsupported arguments are
 rejected before execution. The agent independently allowlists this same tool.
 
-It also exposes bounded workspace tools: `pwd`, `ls`, `cat`, `head`, `tail`,
-and `grep`. File management uses dedicated tools: `touch`, `mkdir`, `cp`,
-`mv`, `rm`, and `rmdir`. Copy is capped at 1 MiB, replacement requires an
-explicit `overwrite: true`, `rm` only removes one regular file, and `rmdir`
+It also exposes dedicated workspace tools:
+
+- `pwd`, `ls`
+- `cat`, `read_file`, `head`, `tail`
+- `grep`, `grep_file`, `grep_text`
+- `find`
+- `touch`, `write_file`, `mkdir`, `cp`, `mv`, `rm`, `rmdir`
+
+`read_file` and `cat` read at most the requested `max_bytes` (capped at
+12 KiB) and reject non-UTF-8/binary data. `grep_file` searches only the
+first 12 KiB of a text file and returns `line:text` matches with a
+`truncated` flag when the file or result set exceeds the budget;
+`grep_text` applies the same matching options (`fixed`, `ignore_case`,
+`max_matches`) to in-memory text. `find` recursively walks from an
+optional workspace-relative root path (default `.`), matches
+workspace-relative paths using the same pattern options, can include files
+and/or directories, returns at most 20 matches, and skips unreadable
+subtrees while reporting the skip count in metadata. `write_file` creates a
+missing file beneath an existing workspace directory, or replaces and
+truncates an existing regular file only when `overwrite: true` is set.
+Copy is capped at 1 MiB, `rm` only removes one regular file, and `rmdir`
 only removes an empty directory. All paths are relative to the configured
 workspace; absolute paths, traversal, and symlink escapes are rejected.
 
@@ -107,8 +125,9 @@ workspace; absolute paths, traversal, and symlink escapes are rejected.
   schema-validated arguments; there is no `sh -c`, `exec.Command` with a
   shell, or string concatenation into a command line anywhere in the tool
   dispatch path.
-- **No filesystem or network access.** The exposed utilities operate only on
-  supplied text; no command accepts a path or invokes a subprocess.
+- **No shell or network access.** The tools never invoke a subprocess or
+  contact the network. Filesystem access is limited to dedicated,
+  schema-validated workspace tools.
 - **Bounded I/O.** Input is capped at 64 KiB, each argument at 4 KiB (up to
   32 arguments), stdout at 256 KiB, and every call is subject to the server
   deadline.
@@ -121,8 +140,10 @@ workspace; absolute paths, traversal, and symlink escapes are rejected.
   container entrypoint wires this to the colocated `llama-server`
   endpoint (`LLAMA_SERVER_HOST` defaults to `0.0.0.0`) and never forwards
   it to an external API.
-- **No mutation tools.** There is no `write_file`, `apply_patch`,
-  `exec_command`, or arbitrary command runner in this design.
+- **No arbitrary mutation tools.** There is no `apply_patch`,
+  `exec_command`, or arbitrary command runner in this design. Writes are
+  limited to dedicated, workspace-confined tools such as `write_file`,
+  `touch`, `mkdir`, `cp`, `mv`, `rm`, and `rmdir`.
 
 ## Prerequisites
 
@@ -217,7 +238,7 @@ depending on the command it is given:
 - **with `mcp` as the first argument** (`docker run ... groovy-agent:local
   mcp`): the entrypoint does not start `llama-server` or the agent at
   all; it runs `coreutils-mcp --transport http`, serving the bundled
-  read-only coreutils tool set over the MCP Streamable HTTP transport for
+  bounded workspace/text tool set over the MCP Streamable HTTP transport for
   any remote MCP-compatible client (see [Run the remote MCP server](#run-the-remote-mcp-server-no-llama-server)
   below).
 
@@ -286,12 +307,13 @@ prompt mode). Nothing extra has to be started or published, and the
 startup logs show the discovery:
 
 ```text
-srv start: MCP warmup: 'coreutils' discovered 16 tools
-srv setup: Added 16 MCP tools
+srv start: MCP warmup: 'coreutils' discovered 18 tools
+srv setup: Added 18 MCP tools
 ```
 
 The tools then appear in the built-in Web UI's tool list as
-`coreutils_pwd`, `coreutils_read_file`, ... and can be enabled per chat.
+`coreutils_pwd`, `coreutils_read_file`, `coreutils_write_file`, ... and can
+be enabled per chat.
 
 Usage and limitations:
 
@@ -328,7 +350,7 @@ Usage and limitations:
   `LLAMA_CHAT_TEMPLATE_FILE` below.
 - MCP support in llama.cpp is marked experimental upstream, and enabling
   it limits CORS origins to localhost by default (see above).
-- Only the read-only coreutils tool set is registered. llama.cpp's own
+- Only the bundled bounded tool set is registered. llama.cpp's own
   built-in tools (`--tools`, which include `write_file` and
   `exec_shell_command`) are deliberately **not** enabled, and every
   registered tool stays confined to `LLAMA_MCP_WORKSPACE` (`/output` by
@@ -597,7 +619,7 @@ just want to validate the container packaging without any model, use
 ## MCP server standalone mode
 
 `cmd/coreutils-mcp` can be pointed at by any MCP-compatible client as a
-standalone read-only coreutils server, over either transport.
+standalone bounded workspace/text MCP server, over either transport.
 
 ### stdio (local clients that spawn a child process)
 
@@ -656,7 +678,7 @@ registration performed by the image
 This rebuild intentionally does not include (and will not add without a
 new, explicit design): network-fetch tools, browser automation, GitHub or
 other cloud-provider integrations, package-manager invocation, arbitrary
-shell/command execution, file-write/patch tools, multi-turn session
-persistence, or a moderator/planner layer. The only integration surface
-is the coreutils MCP tool set described above, plus the local
+shell/command execution, unrestricted patch/application tools, multi-turn
+session persistence, or a moderator/planner layer. The only integration
+surface is the bounded MCP tool set described above, plus the local
 `llama-server` HTTP API.

@@ -43,9 +43,9 @@ Use JSON arguments matching the tool schema.
 After receiving results, answer concisely.
 Do not repeat large tool output unless requested.`
 
-// AllowedTools is the default read-only coreutils policy.
+// AllowedTools is the default bounded workspace/coreutils policy.
 var AllowedTools = []string{
-	"cat", "coreutils_run", "cp", "grep", "head", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "tail", "touch",
+	"cat", "coreutils_run", "cp", "find", "grep", "grep_file", "grep_text", "head", "ls", "mkdir", "mv", "pwd", "read_file", "rm", "rmdir", "tail", "touch", "write_file",
 }
 
 // Config holds the validated CLI configuration.

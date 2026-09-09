@@ -1,5 +1,5 @@
 // Package mcpserver implements the coreutils MCP server. It speaks JSON-RPC
-// 2.0 over stdio, exposes a read-only coreutils tool set, and enforces the
+// 2.0 over stdio, exposes a bounded workspace/text tool set, and enforces the
 // workspace boundary and the resource limits from PLAN.md.
 package mcpserver
 
