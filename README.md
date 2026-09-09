@@ -75,16 +75,28 @@ The agent (`internal/agent`):
    final answer or the round budget is spent.
 6. Prints the final answer to stdout; all diagnostics go to stderr.
 
-There is no shell execution, no free-form command string, no write/mutate
-tools, and no long-running session state. Each run answers exactly one
-prompt and exits.
+There is no shell execution, no free-form command string, and no long-running
+session state. Workspace mutations are limited to dedicated bounded tools.
+Each run answers exactly one prompt and exits.
 
-## Supported MCP tool
+## Supported MCP tools
 
-The MCP server exposes exactly one closed-schema tool, `coreutils_run`:
+The MCP server exposes a closed-schema `coreutils_run` tool:
 
 ```json
 {"command":"sort","args":["--reverse"],"stdin":"pear\napple\n"}
+```
+
+```json
+{"path":"notes/todo.txt","content":"ship v1\n","overwrite":true}
+```
+
+```json
+{"path":".","name":"README","match_mode":"substring","max_results":20}
+```
+
+```json
+{"text":"alpha\nbeta\n","pattern":"beta","fixed":true}
 ```
 
 It runs only approved, in-process, read-only text commands against the supplied
@@ -94,12 +106,22 @@ and `cut -d DELIMITER -f FIELDS`. The response contains `command`, `stdout`,
 `stderr`, and `truncated`. Unknown commands and unsupported arguments are
 rejected before execution. The agent independently allowlists this same tool.
 
-It also exposes bounded workspace tools: `pwd`, `ls`, `cat`, `head`, `tail`,
-and `grep`. File management uses dedicated tools: `touch`, `mkdir`, `cp`,
-`mv`, `rm`, and `rmdir`. Copy is capped at 1 MiB, replacement requires an
-explicit `overwrite: true`, `rm` only removes one regular file, and `rmdir`
-only removes an empty directory. All paths are relative to the configured
-workspace; absolute paths, traversal, and symlink escapes are rejected.
+It also exposes bounded workspace tools:
+- inspection/search: `pwd`, `ls`, `cat`, `head`, `tail`, `grep`, and `find`
+- file management: `touch`, `write_file`, `mkdir`, `cp`, `mv`, `rm`, and `rmdir`
+
+`cat` is the bounded "print file content" tool. `grep` supports searching either
+one workspace file (`path`) or supplied text (`text`) and always returns bounded
+line-oriented matches (`line:text`). `find` recursively searches below a
+workspace-relative directory, returns bounded file/directory paths, and appends
+`/` to directory matches. `write_file` requires explicit intent for existing
+files: set either `overwrite: true` (replace) or `append: true` (append).
+
+Copy is capped at 1 MiB, `write_file` content is capped at 64 KiB per call,
+replacement requires explicit authorization, `rm` only removes one regular
+file, and `rmdir` only removes an empty directory. All paths are relative to
+the configured workspace; absolute paths, traversal, and symlink escapes are
+rejected.
 
 ## Security boundaries
 
@@ -121,8 +143,10 @@ workspace; absolute paths, traversal, and symlink escapes are rejected.
   container entrypoint wires this to the colocated `llama-server`
   endpoint (`LLAMA_SERVER_HOST` defaults to `0.0.0.0`) and never forwards
   it to an external API.
-- **No mutation tools.** There is no `write_file`, `apply_patch`,
-  `exec_command`, or arbitrary command runner in this design.
+- **No arbitrary mutation or shell tools.** Mutations are limited to bounded,
+  closed-schema workspace operations (`touch`, `write_file`, `mkdir`, `cp`,
+  `mv`, `rm`, `rmdir`). There is still no `apply_patch`, `exec_command`, or
+  arbitrary command runner in this design.
 
 ## Prerequisites
 
@@ -328,7 +352,7 @@ Usage and limitations:
   `LLAMA_CHAT_TEMPLATE_FILE` below.
 - MCP support in llama.cpp is marked experimental upstream, and enabling
   it limits CORS origins to localhost by default (see above).
-- Only the read-only coreutils tool set is registered. llama.cpp's own
+- Only this repository's bounded MCP tool set is registered. llama.cpp's own
   built-in tools (`--tools`, which include `write_file` and
   `exec_shell_command`) are deliberately **not** enabled, and every
   registered tool stays confined to `LLAMA_MCP_WORKSPACE` (`/output` by

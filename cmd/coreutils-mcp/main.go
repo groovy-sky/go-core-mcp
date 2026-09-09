@@ -1,4 +1,4 @@
-// Command coreutils-mcp serves the read-only coreutils tool set using the
+// Command coreutils-mcp serves the bounded coreutils/workspace MCP tool set using the
 // Model Context Protocol. It defaults to newline-delimited JSON-RPC over
 // stdio for local MCP clients that spawn a child process, and can instead
 // serve the MCP Streamable HTTP transport for remote MCP-capable clients.

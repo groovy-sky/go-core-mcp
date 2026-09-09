@@ -20,6 +20,7 @@ var requestedLimits = map[string]int{
 	"max_bytes":   12 << 10,
 	"lines":       200,
 	"max_matches": 20,
+	"max_results": 200,
 }
 
 // validationError describes a rejected tool call.

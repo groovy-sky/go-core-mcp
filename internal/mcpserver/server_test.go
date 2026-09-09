@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,10 +35,13 @@ func call(t *testing.T, server *Server, name, arguments string) map[string]any {
 
 func TestOnlySafeMCPToolsAreExposed(t *testing.T) {
 	server := newTestServer(t, t.TempDir())
-	if names := server.ToolNames(); len(names) != 2 || names[0] != "coreutils_run" || names[1] != "pwd" {
+	expected := []string{
+		"cat", "coreutils_run", "cp", "find", "grep", "head", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "tail", "touch", "write_file",
+	}
+	if names := server.ToolNames(); strings.Join(names, ",") != strings.Join(expected, ",") {
 		t.Fatalf("unexpected tools: %v", names)
 	}
-	for _, name := range append(WriteCapableTools, "cat", "grep", "sh", "rm") {
+	for _, name := range append(WriteCapableTools, "sh", "exec_shell_command") {
 		if body := call(t, server, name, `{}`); body["error"] != mcpproto.ErrorUnknownTool {
 			t.Fatalf("%s: %v", name, body)
 		}
