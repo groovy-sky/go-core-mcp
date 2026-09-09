@@ -75,9 +75,8 @@ The agent (`internal/agent`):
    final answer or the round budget is spent.
 6. Prints the final answer to stdout; all diagnostics go to stderr.
 
-There is no shell execution, no free-form command string, no write/mutate
-tools, and no long-running session state. Each run answers exactly one
-prompt and exits.
+There is no shell execution, no free-form command string, and no long-running
+session state. Each run answers exactly one prompt and exits.
 
 ## Supported MCP tool
 
@@ -95,11 +94,25 @@ and `cut -d DELIMITER -f FIELDS`. The response contains `command`, `stdout`,
 rejected before execution. The agent independently allowlists this same tool.
 
 It also exposes bounded workspace tools: `pwd`, `ls`, `cat`, `head`, `tail`,
-and `grep`. File management uses dedicated tools: `touch`, `mkdir`, `cp`,
-`mv`, `rm`, and `rmdir`. Copy is capped at 1 MiB, replacement requires an
-explicit `overwrite: true`, `rm` only removes one regular file, and `rmdir`
-only removes an empty directory. All paths are relative to the configured
-workspace; absolute paths, traversal, and symlink escapes are rejected.
+`grep`, `touch`, `mkdir`, `cp`, `mv`, `rm`, and `rmdir`, plus the following
+filesystem/text helpers:
+
+- `write_file` — writes `content` to `path`; creates new files and rejects
+  replacing an existing file unless `overwrite: true` is set.
+- `find_paths` — searches from `root` (default `"."`) for files and/or
+  directories whose names or relative paths match `pattern`; traversal is
+  bounded by `max_results` and permission-denied subtrees are skipped.
+- `search_file` — searches one UTF-8 text file for `pattern` and returns
+  line-numbered matches plus optional surrounding `context_lines`.
+- `grep_text` — grep-style pattern search over supplied in-memory `text`,
+  returning line-numbered matches.
+- `read_file` — reads one UTF-8 text file and returns its full contents when
+  the file size is within `max_bytes`.
+
+All paths are relative to the configured workspace; absolute paths, traversal,
+and symlink escapes are rejected. `read_file` and `search_file` reject binary
+files and report `result_too_large` when file size exceeds the configured byte
+limit.
 
 ## Security boundaries
 
@@ -121,8 +134,8 @@ workspace; absolute paths, traversal, and symlink escapes are rejected.
   container entrypoint wires this to the colocated `llama-server`
   endpoint (`LLAMA_SERVER_HOST` defaults to `0.0.0.0`) and never forwards
   it to an external API.
-- **No mutation tools.** There is no `write_file`, `apply_patch`,
-  `exec_command`, or arbitrary command runner in this design.
+- **No arbitrary execution.** The server does not expose `exec_command`,
+  shell tools, or free-form process execution.
 
 ## Prerequisites
 

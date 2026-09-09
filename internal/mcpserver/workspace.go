@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/groovy-sky/groovy-agent/internal/mcpproto"
 )
@@ -167,4 +168,40 @@ func (s *Server) requireText(arguments map[string]any, key string) (string, erro
 		return "", fail(mcpproto.ErrorInvalidArguments, "input text exceeds the allowed size")
 	}
 	return value, nil
+}
+
+// readTextFile reads one regular workspace file, rejects binary payloads, and
+// reports actionable errors for oversize or unreadable input.
+func (s *Server) readTextFile(relative string, limit int) (string, error) {
+	path, err := s.resolvePath(relative)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fail(mcpproto.ErrorToolError, "file could not be inspected")
+	}
+	if info.IsDir() {
+		return "", fail(mcpproto.ErrorInvalidArguments, "path is a directory, not a file")
+	}
+	if !info.Mode().IsRegular() {
+		return "", fail(mcpproto.ErrorInvalidArguments, "path is not a regular file")
+	}
+	if limit <= 0 || limit > s.limits.MaxFileReadBytes {
+		limit = s.limits.MaxFileReadBytes
+	}
+	if info.Size() > int64(limit) {
+		return "", fail(mcpproto.ErrorResultTooLarge, "file exceeds the %d-byte read limit; use a smaller file or increase constraints", limit)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsPermission(err) {
+			return "", fail(mcpproto.ErrorPermissionDenied, "file is not readable")
+		}
+		return "", fail(mcpproto.ErrorToolError, "file could not be read")
+	}
+	if !utf8.Valid(data) || strings.ContainsRune(string(data), '\x00') {
+		return "", fail(mcpproto.ErrorInvalidArguments, "file appears to be binary; only UTF-8 text files are supported")
+	}
+	return string(data), nil
 }
