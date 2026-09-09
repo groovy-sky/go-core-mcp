@@ -118,8 +118,9 @@ workspace; absolute paths, traversal, and symlink escapes are rejected.
   tool schemas to the model or execute unexpected tool calls.
 - **Local-only inference.** `llama-server` is only reachable via
   `--llama-url`, which must be an `http://` or `https://` URL; the
-  container/entrypoint wires this to `127.0.0.1` by default and never
-  forwards it to an external API.
+  container entrypoint wires this to the colocated `llama-server`
+  endpoint (`LLAMA_SERVER_HOST` defaults to `0.0.0.0`) and never forwards
+  it to an external API.
 - **No mutation tools.** There is no `write_file`, `apply_patch`,
   `exec_command`, or arbitrary command runner in this design.
 

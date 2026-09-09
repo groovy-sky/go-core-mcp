@@ -111,7 +111,7 @@ import sys
 with open("/output/llama-argv.txt", "w", encoding="utf-8") as fp:
     fp.write("\n".join(sys.argv[1:]) + "\n")
 
-host = os.environ.get("LLAMA_SERVER_HOST", "127.0.0.1")
+host = os.environ.get("LLAMA_SERVER_HOST", "0.0.0.0")
 port = int(os.environ.get("LLAMA_SERVER_PORT", "8080"))
 
 
@@ -171,6 +171,12 @@ EXTRA_RUN_ENV=()
 # The entrypoint provides container defaults before user-supplied agent flags and
 # prompt arguments.
 run_forwarding_case "agent defaults plus prompt" --workspace /output "test prompt"
+default_llama_host="$(awk 'seen{print; exit} $0=="--host"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
+if [[ "$default_llama_host" != "0.0.0.0" ]]; then
+  echo "FAIL: expected entrypoint default llama-server host 0.0.0.0, got '${default_llama_host:-<missing>}'" >&2
+  exit 1
+fi
+echo "    entrypoint passes default --host 0.0.0.0 to llama-server"
 if ! grep -qx -- "--mcp-command" "$WORK_DIR/output/forward-log.txt"; then
   echo "FAIL: expected bundled MCP command flag" >&2
   exit 1
@@ -237,6 +243,18 @@ if grep -qx -- "--ui-mcp-proxy" "$WORK_DIR/output/llama-argv.txt"; then
   exit 1
 fi
 echo "    LLAMA_MCP_UI_PROXY=0 keeps the coreutils MCP server without --ui-mcp-proxy"
+
+# An explicit LLAMA_SERVER_HOST override must still be forwarded as llama-server's
+# bind address.
+EXTRA_RUN_ENV=(-e LLAMA_SERVER_HOST=127.0.0.1)
+run_forwarding_case "llama host override" --workspace /output "test prompt"
+EXTRA_RUN_ENV=()
+override_llama_host="$(awk 'seen{print; exit} $0=="--host"{seen=1}' "$WORK_DIR/output/llama-argv.txt")"
+if [[ "$override_llama_host" != "127.0.0.1" ]]; then
+  echo "FAIL: expected LLAMA_SERVER_HOST override to set --host 127.0.0.1, got '${override_llama_host:-<missing>}'" >&2
+  exit 1
+fi
+echo "    LLAMA_SERVER_HOST override is forwarded to llama-server"
 
 # The registration is opt-out, so operators can start llama-server without any
 # tool set at all.

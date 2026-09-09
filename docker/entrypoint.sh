@@ -77,7 +77,7 @@ if [[ "${1:-}" == "mcp" ]]; then
   exit "$wait_status"
 fi
 
-LLAMA_SERVER_HOST="${LLAMA_SERVER_HOST:-127.0.0.1}"
+LLAMA_SERVER_HOST="${LLAMA_SERVER_HOST:-0.0.0.0}"
 LLAMA_SERVER_PORT="${LLAMA_SERVER_PORT:-8080}"
 LLAMA_MODEL_FILE="${LLAMA_MODEL_FILE:-Phi-4-mini-instruct.Q8_0.gguf}"
 LLAMA_MODEL_PATH="${LLAMA_MODEL_PATH:-/models/${LLAMA_MODEL_FILE}}"
