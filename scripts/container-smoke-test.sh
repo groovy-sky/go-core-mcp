@@ -4,8 +4,11 @@
 # This validates packaging/wiring regressions without requiring model
 # inference or downloading the GGUF model at test runtime:
 #
-#   1. The compiled `/usr/local/bin/groovy-agent` and
-#      `/usr/local/bin/coreutils-mcp` binaries are present in the final image.
+#   1. The final image keeps this repo's container entrypoint
+#      (`/usr/local/bin/entrypoint.sh`) as its effective ENTRYPOINT (not the
+#      upstream llama.cpp base image entrypoint), and still contains the
+#      compiled `/usr/local/bin/groovy-agent` and `/usr/local/bin/coreutils-mcp`
+#      binaries.
 #   2. `docker/entrypoint.sh` starts llama-server, waits for it to become
 #      healthy, and forwards the container command to `groovy-agent`
 #      with the bundled MCP server configured.
@@ -74,6 +77,13 @@ echo "==> Verifying compiled binaries"
 "$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c \
   'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp'
 echo "    groovy-agent and coreutils-mcp binaries OK"
+
+echo "==> Verifying runtime entrypoint wiring"
+if [[ "$("$CONTAINER_ENGINE" inspect --format '{{json .Config.Entrypoint}}' "$IMAGE_NAME")" != '["/usr/local/bin/entrypoint.sh"]' ]]; then
+  echo "FAIL: expected image ENTRYPOINT to be [\"/usr/local/bin/entrypoint.sh\"]" >&2
+  exit 1
+fi
+echo "    image ENTRYPOINT is /usr/local/bin/entrypoint.sh"
 
 echo "==> Verifying llama-server host default"
 if ! "$CONTAINER_ENGINE" inspect \
@@ -416,6 +426,41 @@ sys.exit(0 if ok else 1)
   exit 1
 fi
 echo "    /props reports chat_template_caps: $props_caps"
+
+# With MCP enabled by default, /tools must be active (not feature_disabled)
+# and expose the bundled coreutils tool names consumed by the built-in Web UI.
+tools_response="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" \
+  curl -fsS "http://127.0.0.1:8080/tools" 2>/dev/null || true)"
+if [[ -z "$tools_response" ]]; then
+  echo "FAIL: /tools returned an empty response" >&2
+  exit 1
+fi
+if ! tools_count="$(python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+if isinstance(doc, dict):
+    if doc.get("error", {}).get("type") == "feature_disabled":
+        print("feature_disabled", file=sys.stderr)
+        sys.exit(1)
+    items = doc.get("data")
+elif isinstance(doc, list):
+    items = doc
+else:
+    items = None
+if not isinstance(items, list):
+    print("missing tools list", file=sys.stderr)
+    sys.exit(1)
+count = sum(1 for item in items if isinstance(item, dict) and str(item.get("tool", "")).startswith("coreutils_"))
+if count <= 0:
+    print("no coreutils tools discovered", file=sys.stderr)
+    sys.exit(1)
+print(count)
+' <<< "$tools_response")"; then
+  echo "FAIL: /tools is not enabled with bundled MCP tools" >&2
+  echo "$tools_response" >&2
+  exit 1
+fi
+echo "    /tools is enabled and advertises $tools_count bundled coreutils tool(s)"
 
 # --ui-mcp-proxy makes llama-server serve a `/cors-proxy` endpoint for the Web
 # UI's own MCP-over-browser feature; a disabled proxy answers 403 there (see

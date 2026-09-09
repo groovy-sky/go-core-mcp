@@ -194,6 +194,15 @@ official `llama.cpp` server image, and wires everything together with
 become healthy, then runs `groovy-agent` with the bundled MCP server
 configured.
 
+When using the published image from GHCR, the Phi-4 workflow now pushes:
+
+- `ghcr.io/groovy-sky/groovy-agent:phi4-mini` (moving tag), plus
+- immutable tags `ghcr.io/groovy-sky/groovy-agent:phi4-mini-<git-sha>` and
+  `ghcr.io/groovy-sky/groovy-agent:phi4-mini-run-<workflow-run-number>`.
+
+For deterministic deployments and debugging, prefer one of the immutable
+tags (or a digest) so you never pull a stale mutable manifest by accident.
+
 `groovy-agent` is a one-shot CLI, so the container behaves differently
 depending on the command it is given:
 

@@ -68,3 +68,4 @@ RUN test -x /opt/llama/llama-server \
 VOLUME /output
 EXPOSE 8080 8765
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD []
