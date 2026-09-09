@@ -119,6 +119,24 @@ func TestGrepLimitsMatches(t *testing.T) {
 	}
 }
 
+func TestCompileMatcherSupportsFixedAndRegexModes(t *testing.T) {
+	matcher, err := CompileMatcher("todo", true, true)
+	if err != nil {
+		t.Fatalf("CompileMatcher fixed: %v", err)
+	}
+	if !matcher("TODO item") || matcher("done") {
+		t.Fatal("fixed matcher produced unexpected results")
+	}
+
+	regex, err := CompileMatcher("^a.+z$", false, false)
+	if err != nil {
+		t.Fatalf("CompileMatcher regex: %v", err)
+	}
+	if !regex("abcz") || regex("ab") {
+		t.Fatal("regex matcher produced unexpected results")
+	}
+}
+
 func TestBasenameAndDirname(t *testing.T) {
 	if got := Basename("docs/README.md", ".md"); got != "README" {
 		t.Fatalf("unexpected basename %q", got)

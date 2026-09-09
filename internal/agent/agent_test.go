@@ -80,6 +80,7 @@ func TestSelectProfileIsDeterministic(t *testing.T) {
 		"Read the beginning of README.md and summarize it.":        "file_inspection",
 		"Count the unique sorted lines in the supplied text.":      "text_processing",
 		"Give me the basename of docs/guide.md":                    "path_processing",
+		"Write hello to notes/output.txt.":                         "file_management",
 		"Explain quantum entanglement":                             "fallback",
 	}
 	for prompt, expected := range cases {

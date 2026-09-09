@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -85,6 +86,15 @@ func definitions() []tool {
 			run: runCat,
 		},
 		{
+			name:        "read_file",
+			description: "Read a bounded workspace text file for console display.",
+			schema: object(map[string]any{
+				"path":      pathField(),
+				"max_bytes": intField("Maximum bytes to read.", 1, 12<<10),
+			}, "path"),
+			run: runCat,
+		},
+		{
 			name:        "head",
 			description: "Read leading lines from a workspace file.",
 			schema: object(map[string]any{
@@ -111,10 +121,53 @@ func definitions() []tool {
 			run: runGrep,
 		},
 		{
+			name:        "grep_file",
+			description: "Search a workspace text file for matching lines.",
+			schema: object(map[string]any{
+				"path": pathField(), "pattern": stringField("Pattern to search for.", 256),
+				"ignore_case": boolField("Case-insensitive search."), "fixed": boolField("Treat the pattern as literal text."),
+				"max_matches": intField("Maximum matches.", 1, 20),
+			}, "path", "pattern"),
+			run: runGrep,
+		},
+		{
+			name:        "grep_text",
+			description: "Search supplied text for matching lines.",
+			schema: object(map[string]any{
+				"text": stringField("UTF-8 text to search.", 12<<10), "pattern": stringField("Pattern to search for.", 256),
+				"ignore_case": boolField("Case-insensitive search."), "fixed": boolField("Treat the pattern as literal text."),
+				"max_matches": intField("Maximum matches.", 1, 20),
+			}, "text", "pattern"),
+			run: runGrepText,
+		},
+		{
+			name:        "find",
+			description: "Recursively search workspace files and directories by path pattern.",
+			schema: object(map[string]any{
+				"path":        pathField(),
+				"pattern":     stringField("Pattern to search for in workspace-relative paths.", 256),
+				"ignore_case": boolField("Case-insensitive search."),
+				"fixed":       boolField("Treat the pattern as literal text."),
+				"max_matches": intField("Maximum matches.", 1, 20),
+				"files":       boolField("Include regular files and other non-directory entries."),
+				"directories": boolField("Include directories."),
+			}, "pattern"),
+			run: runFind,
+		},
+		{
 			name:        "touch",
 			description: "Create an empty workspace file or update its modification time.",
 			schema:      object(map[string]any{"path": pathField()}, "path"),
 			run:         runTouch,
+		},
+		{
+			name:        "write_file",
+			description: "Create a workspace text file or replace an existing file's contents.",
+			schema: object(map[string]any{
+				"path": pathField(), "content": stringField("UTF-8 text to write.", 12<<10),
+				"overwrite": boolField("Replace and truncate an existing regular file."),
+			}, "path", "content"),
+			run: runWriteFile,
 		},
 		{
 			name:        "mkdir",
@@ -417,7 +470,7 @@ func runCat(_ context.Context, s *Server, arguments map[string]any) (payload, er
 		return payload{}, err
 	}
 	limit := optionalInt(arguments, "max_bytes", s.limits.MaxFileReadBytes)
-	content, truncated, err := s.readFile(path, limit)
+	content, truncated, err := s.readTextFile(path, limit)
 	if err != nil {
 		return payload{}, err
 	}
@@ -436,7 +489,7 @@ func runHead(_ context.Context, s *Server, arguments map[string]any) (payload, e
 		return payload{}, err
 	}
 	count := optionalInt(arguments, "lines", 20)
-	content, truncated, err := s.readFile(path, s.limits.MaxFileReadBytes)
+	content, truncated, err := s.readTextFile(path, s.limits.MaxFileReadBytes)
 	if err != nil {
 		return payload{}, err
 	}
@@ -454,7 +507,7 @@ func runTail(_ context.Context, s *Server, arguments map[string]any) (payload, e
 		return payload{}, err
 	}
 	count := optionalInt(arguments, "lines", 20)
-	content, truncated, err := s.readFile(path, s.limits.MaxFileReadBytes)
+	content, truncated, err := s.readTextFile(path, s.limits.MaxFileReadBytes)
 	if err != nil {
 		return payload{}, err
 	}
@@ -479,7 +532,7 @@ func runWC(_ context.Context, s *Server, arguments map[string]any) (payload, err
 		if err != nil {
 			return payload{}, err
 		}
-		content, truncated, err = s.readFile(path, s.limits.MaxFileReadBytes)
+		content, truncated, err = s.readTextFile(path, s.limits.MaxFileReadBytes)
 		if err != nil {
 			return payload{}, err
 		}
@@ -503,35 +556,221 @@ func runGrep(_ context.Context, s *Server, arguments map[string]any) (payload, e
 	if err != nil {
 		return payload{}, err
 	}
+	content, truncated, err := s.readTextFile(path, s.limits.MaxFileReadBytes)
+	if err != nil {
+		return payload{}, err
+	}
+	lines, cut, matches, err := grepLines(content, arguments, s.limits.MaxGrepMatches)
+	if err != nil {
+		return payload{}, err
+	}
+	return payload{
+		Output:    coreutils.JoinLines(lines),
+		Truncated: truncated || cut,
+		Metadata:  map[string]any{"path": path, "matches": len(matches)},
+	}, nil
+}
+
+func runGrepText(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	content, err := s.requireText(arguments, "text")
+	if err != nil {
+		return payload{}, err
+	}
+	lines, truncated, matches, err := grepLines(content, arguments, s.limits.MaxGrepMatches)
+	if err != nil {
+		return payload{}, err
+	}
+	return payload{
+		Output:    coreutils.JoinLines(lines),
+		Truncated: truncated,
+		Metadata:  map[string]any{"matches": len(matches)},
+	}, nil
+}
+
+func grepLines(content string, arguments map[string]any, maxMatchesLimit int) ([]string, bool, []coreutils.Match, error) {
 	pattern, err := requireString(arguments, "pattern")
 	if err != nil {
-		return payload{}, err
+		return nil, false, nil, err
 	}
-	maxMatches := optionalInt(arguments, "max_matches", s.limits.MaxGrepMatches)
-	if maxMatches > s.limits.MaxGrepMatches {
-		maxMatches = s.limits.MaxGrepMatches
+	maxMatches := optionalInt(arguments, "max_matches", maxMatchesLimit)
+	if maxMatches > maxMatchesLimit {
+		maxMatches = maxMatchesLimit
 	}
-	content, truncated, err := s.readFile(path, s.limits.MaxFileReadBytes)
-	if err != nil {
-		return payload{}, err
-	}
-	matches, cut, err := coreutils.Grep(content, coreutils.GrepOptions{
+	matches, truncated, err := coreutils.Grep(content, coreutils.GrepOptions{
 		Pattern:    pattern,
 		IgnoreCase: optionalBool(arguments, "ignore_case"),
 		FixedText:  optionalBool(arguments, "fixed"),
 		MaxMatches: maxMatches,
 	})
 	if err != nil {
-		return payload{}, fail(mcpproto.ErrorInvalidArguments, "%s", err.Error())
+		return nil, false, nil, fail(mcpproto.ErrorInvalidArguments, "%s", err.Error())
 	}
 	lines := make([]string, 0, len(matches))
 	for _, match := range matches {
 		lines = append(lines, fmt.Sprintf("%d:%s", match.Line, match.Text))
 	}
+	return lines, truncated, matches, nil
+}
+
+func runFind(ctx context.Context, s *Server, arguments map[string]any) (payload, error) {
+	root, _ := arguments["path"].(string)
+	if root == "" {
+		root = "."
+	}
+	pattern, err := requireString(arguments, "pattern")
+	if err != nil {
+		return payload{}, err
+	}
+	matcher, err := coreutils.CompileMatcher(pattern, optionalBool(arguments, "ignore_case"), optionalBool(arguments, "fixed"))
+	if err != nil {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "%s", err.Error())
+	}
+	includeFiles := true
+	includeDirectories := true
+	if value, ok := arguments["files"].(bool); ok {
+		includeFiles = value
+	}
+	if value, ok := arguments["directories"].(bool); ok {
+		includeDirectories = value
+	}
+	if !includeFiles && !includeDirectories {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "at least one of \"files\" or \"directories\" must be true")
+	}
+	maxMatches := optionalInt(arguments, "max_matches", s.limits.MaxGrepMatches)
+	if maxMatches > s.limits.MaxGrepMatches {
+		maxMatches = s.limits.MaxGrepMatches
+	}
+	rootPath, err := s.resolvePath(root)
+	if err != nil {
+		return payload{}, err
+	}
+	info, err := os.Stat(rootPath)
+	if err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "search root could not be inspected")
+	}
+
+	results := make([]string, 0, maxMatches)
+	truncated := false
+	skipped := 0
+	appendMatch := func(path string, isDir bool) error {
+		if len(results) >= maxMatches {
+			truncated = true
+			return fs.SkipAll
+		}
+		relative := s.relativePath(path)
+		if relative == "." && isDir {
+			return nil
+		}
+		rendered := relative
+		if isDir {
+			rendered += "/"
+		}
+		if !matcher(rendered) {
+			return nil
+		}
+		rendered, cut := coreutils.ClampLine(rendered)
+		truncated = truncated || cut
+		results = append(results, rendered)
+		if len(results) >= maxMatches {
+			truncated = true
+			return fs.SkipAll
+		}
+		return nil
+	}
+
+	if !info.IsDir() {
+		if err := appendMatch(rootPath, false); err != nil && !errors.Is(err, fs.SkipAll) {
+			return payload{}, fail(mcpproto.ErrorToolError, "search failed")
+		}
+		return payload{
+			Output:    coreutils.JoinLines(results),
+			Truncated: truncated,
+			Metadata:  map[string]any{"path": root, "matches": len(results), "skipped": skipped},
+		}, nil
+	}
+
+	walkErr := filepath.WalkDir(rootPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			skipped++
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if path == rootPath {
+			return nil
+		}
+		if entry.IsDir() {
+			if !includeDirectories {
+				return nil
+			}
+			return appendMatch(path, true)
+		}
+		if !includeFiles {
+			return nil
+		}
+		return appendMatch(path, false)
+	})
+	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
+		return payload{}, walkErr
+	}
 	return payload{
-		Output:    coreutils.JoinLines(lines),
-		Truncated: truncated || cut,
-		Metadata:  map[string]any{"path": path, "matches": len(matches)},
+		Output:    coreutils.JoinLines(results),
+		Truncated: truncated,
+		Metadata:  map[string]any{"path": root, "matches": len(results), "skipped": skipped},
+	}, nil
+}
+
+func runWriteFile(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	relative, err := requireString(arguments, "path")
+	if err != nil {
+		return payload{}, err
+	}
+	content, err := s.requireText(arguments, "content")
+	if err != nil {
+		return payload{}, err
+	}
+	path, err := s.resolveTouchPath(relative)
+	if err != nil {
+		return payload{}, err
+	}
+
+	created := false
+	flag := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if info, statErr := os.Lstat(path); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return payload{}, fail(mcpproto.ErrorInvalidArguments, "path is not a regular file")
+		}
+		if !optionalBool(arguments, "overwrite") {
+			return payload{}, fail(mcpproto.ErrorInvalidArguments, "path already exists; set overwrite to replace it")
+		}
+		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	} else if os.IsNotExist(statErr) {
+		created = true
+	} else {
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be inspected")
+	}
+
+	file, err := os.OpenFile(path, flag, 0o600)
+	if err != nil {
+		if os.IsPermission(err) {
+			return payload{}, fail(mcpproto.ErrorPermissionDenied, "file could not be written")
+		}
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be written")
+	}
+	if _, err := io.WriteString(file, content); err != nil {
+		file.Close()
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be written")
+	}
+	if err := file.Close(); err != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be written")
+	}
+	return payload{
+		Output:   relative,
+		Metadata: map[string]any{"path": relative, "bytes": len(content), "created": created, "overwritten": !created},
 	}, nil
 }
 

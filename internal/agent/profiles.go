@@ -14,7 +14,7 @@ const MaxExposedTools = 6
 // FallbackProfile is used when no profile matches confidently.
 var FallbackProfile = Profile{
 	Name:  "fallback",
-	Tools: []string{"pwd", "ls", "cat", "grep", "coreutils_run", "touch"},
+	Tools: []string{"pwd", "ls", "read_file", "grep_file", "find", "coreutils_run"},
 }
 
 // profiles are evaluated in this fixed order so selection is deterministic.
@@ -27,11 +27,11 @@ var profiles = []struct {
 		keywords: []string{"date", "time", "clock", "timestamp", "today", "utc", "current time"},
 	},
 	{
-		profile:  Profile{Name: "file_search", Tools: []string{"ls", "grep", "head", "cat"}},
-		keywords: []string{"grep", "search", "find occurrences", "occurrence", "occurrences", "matches", "matching", "pattern", "todo", "look for", "contains"},
+		profile:  Profile{Name: "file_search", Tools: []string{"find", "grep_file", "head", "read_file", "ls"}},
+		keywords: []string{"grep", "search", "find", "find occurrences", "occurrence", "occurrences", "matches", "matching", "pattern", "todo", "look for", "contains"},
 	},
 	{
-		profile:  Profile{Name: "file_inspection", Tools: []string{"pwd", "ls", "cat", "head", "tail", "coreutils_run"}},
+		profile:  Profile{Name: "file_inspection", Tools: []string{"pwd", "ls", "read_file", "head", "tail", "coreutils_run"}},
 		keywords: []string{"read", "show", "workspace", "readme", "file", "beginning", "summarize", "summary", "content", "contents", "checksum", "sha256", "hash", "inspect", "lines of", "print"},
 	},
 	{
@@ -43,8 +43,8 @@ var profiles = []struct {
 		keywords: []string{"sort", "unique", "uniq", "duplicate", "base64", "encode", "decode", "translate characters", "fields", "column", "columns", "cut", "merge lines"},
 	},
 	{
-		profile:  Profile{Name: "file_management", Tools: []string{"ls", "mkdir", "touch", "cp", "mv", "rm"}},
-		keywords: []string{"touch", "create", "new", "empty", "mkdir", "directory", "copy", "move", "rename", "remove", "delete", "create file", "new file", "empty file"},
+		profile:  Profile{Name: "file_management", Tools: []string{"ls", "mkdir", "write_file", "cp", "mv", "rm"}},
+		keywords: []string{"touch", "create", "new", "empty", "mkdir", "directory", "copy", "move", "rename", "remove", "delete", "create file", "new file", "empty file", "write", "save", "overwrite", "replace content", "update file"},
 	},
 }
 
