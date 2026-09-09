@@ -157,6 +157,8 @@ LLAMA_PREDICT_LIMIT="${LLAMA_PREDICT_LIMIT:-1024}"
 #   tool call stays inside it, exactly as in the standalone `mcp` mode.
 LLAMA_MCP_COREUTILS="${LLAMA_MCP_COREUTILS:-1}"
 LLAMA_MCP_WORKSPACE="${LLAMA_MCP_WORKSPACE:-${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}}"
+LLAMA_MCP_WEBUTILS="${LLAMA_MCP_WEBUTILS:-0}"
+AGENT_WEB_MCP_COMMAND="${AGENT_WEB_MCP_COMMAND:-}"
 
 # llama-server's built-in Web UI has its own, separate MCP feature: from the
 # UI's Settings panel a user can register additional MCP servers directly in
@@ -224,7 +226,7 @@ has_positional_prompt() {
       -*=*)
         shift
         ;;
-      -llama-url|--llama-url|-model|--model|-mcp-command|--mcp-command|-workspace|--workspace)
+      -llama-url|--llama-url|-model|--model|-mcp-command|--mcp-command|-web-mcp-command|--web-mcp-command|-workspace|--workspace)
         shift
         if (( $# > 0 )); then
           shift
@@ -296,7 +298,8 @@ fi
 # its plain "chatml" fallback) — neither of which support tool calls, so
 # this is only useful for troubleshooting or non-tool-calling use cases.
 
-if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
+if [[ "$LLAMA_MCP_COREUTILS" != "0" || "$LLAMA_MCP_WEBUTILS" != "0" ]]; then
+  mcp_servers_entries=()
   if [[ "$LLAMA_MCP_WORKSPACE" != /* ]]; then
     echo "LLAMA_MCP_WORKSPACE must be an absolute path: $LLAMA_MCP_WORKSPACE" >&2
     echo "llama-server spawns the MCP server itself, so a relative path would" >&2
@@ -308,13 +311,21 @@ if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
     exit 1
   fi
   mkdir -p "$LLAMA_MCP_WORKSPACE"
-  mcp_servers_json="$(printf '{"mcpServers":{"coreutils":{"command":"/usr/local/bin/coreutils-mcp","args":["--workspace","%s","--transport","stdio"]}}}' \
-    "$(json_escape "$LLAMA_MCP_WORKSPACE")")"
+  if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
+    mcp_servers_entries+=("$(printf '"coreutils":{"command":"/usr/local/bin/coreutils-mcp","args":["--workspace","%s","--transport","stdio"]}' "$(json_escape "$LLAMA_MCP_WORKSPACE")")")
+    echo "registering bundled coreutils MCP server with llama-server (stdio)" >&2
+    echo "MCP tool workspace: ${LLAMA_MCP_WORKSPACE} (read-only tools)" >&2
+  fi
+  if [[ "$LLAMA_MCP_WEBUTILS" != "0" ]]; then
+    mcp_servers_entries+=('"webutils":{"command":"/usr/local/bin/webutils-mcp","args":[]}')
+    echo "registering bundled webutils MCP server with llama-server (stdio)" >&2
+    echo "webutils browse_url is networked and should only be enabled on trusted egress-controlled networks" >&2
+  fi
+  IFS=, mcp_servers_json="$(printf '{"mcpServers":{%s}}' "${mcp_servers_entries[*]}")"
+  unset IFS
   llama_args+=(--mcp-servers-json "$mcp_servers_json")
-  echo "registering bundled coreutils MCP server with llama-server (stdio)" >&2
-  echo "MCP tool workspace: ${LLAMA_MCP_WORKSPACE} (read-only tools)" >&2
   echo "llama-server limits CORS origins to localhost while MCP servers are" >&2
-  echo "enabled; set LLAMA_MCP_COREUTILS=0 to start without the tool set." >&2
+  echo "enabled; set LLAMA_MCP_COREUTILS=0 and LLAMA_MCP_WEBUTILS=0 to start without bundled MCP servers." >&2
 
   if [[ "$LLAMA_MCP_UI_PROXY" != "0" ]]; then
     llama_args+=(--ui-mcp-proxy)
@@ -384,8 +395,11 @@ agent_args=(
   --llama-url "http://${LLAMA_SERVER_HOST}:${LLAMA_SERVER_PORT}"
   --model "$LLAMA_MODEL_NAME"
   --mcp-command /usr/local/bin/coreutils-mcp
-  "$@"
 )
+if [[ -n "$AGENT_WEB_MCP_COMMAND" ]]; then
+  agent_args+=(--web-mcp-command "$AGENT_WEB_MCP_COMMAND")
+fi
+agent_args+=("$@")
 
 /usr/local/bin/groovy-agent "${agent_args[@]}" <&3 &
 agent_pid=$!

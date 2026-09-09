@@ -17,10 +17,11 @@ import (
 // requestedLimits caps the bounded arguments the model may ask for. The model
 // can never raise a safety limit.
 var requestedLimits = map[string]int{
-	"max_bytes":   12 << 10,
-	"lines":       200,
-	"max_matches": 20,
-	"max_results": 200,
+	"max_bytes":      12 << 10,
+	"lines":          200,
+	"max_matches":    20,
+	"max_results":    200,
+	"max_text_chars": 12 << 10,
 }
 
 // validationError describes a rejected tool call.
@@ -53,7 +54,11 @@ func (s *Session) runToolCall(ctx context.Context, exposed map[string]mcpproto.T
 
 	s.toolCalls++
 	started := time.Now()
-	result, err := s.mcp.CallTool(ctx, tool.Name, arguments)
+	client, ok := s.clients[tool.Name]
+	if !ok {
+		return llm.Message{}, fmt.Errorf("tool %q has no bound MCP client", tool.Name)
+	}
+	result, err := client.CallTool(ctx, tool.Name, arguments)
 	duration := time.Since(started)
 	if err != nil {
 		if ctx.Err() != nil {

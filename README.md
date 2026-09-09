@@ -2,12 +2,12 @@
 
 A minimal, reliable Go agent that answers a single prompt using a local
 [`llama.cpp`](https://github.com/ggml-org/llama.cpp) `llama-server` and a
-bounded set of **read-only coreutils tools** exposed over the
+bounded set of MCP tools exposed over the
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
 
-The design intentionally has no non-coreutils integrations: no network
-fetch, no browser, no GitHub/cloud APIs, no package management, no shell
-string execution, and no file-write tools. See
+By default only the coreutils/workspace MCP server is enabled. An optional,
+separate `webutils-mcp` server can be explicitly allowlisted to provide one
+bounded Chromium tool (`browse_url`) for public HTTPS browsing. See
 [Architecture](#architecture) and [Security boundaries](#security-boundaries)
 below for the exact guarantees.
 
@@ -29,7 +29,8 @@ Go CLI agent (cmd/agent)
    ├── HTTP  ─────► llama-server (OpenAI-compatible /v1/chat/completions)
    │                Phi-4-mini-instruct GGUF, llama.cpp
    │
-   └── stdio ────► coreutils MCP server (cmd/coreutils-mcp)
+   ├── stdio ────► coreutils MCP server (cmd/coreutils-mcp)
+   └── stdio ────► optional webutils MCP server (cmd/webutils-mcp; opt-in)
 ```
 
 `cmd/coreutils-mcp` can alternatively be run in a second, independent
@@ -47,15 +48,16 @@ MCP natively (see [MCP server standalone mode](#mcp-server-standalone-mode)
 below).
 
 Inside the Docker image there is a third wiring: the bundled `llama-server`
-is itself an MCP client. It spawns the coreutils MCP server over stdio and
-exposes its tools to the chat flow (including its own Web UI), so no
-external MCP client is needed:
+is itself an MCP client. It always spawns the coreutils MCP server (unless
+opted out) and can optionally spawn `webutils-mcp`, exposing discovered tools
+to the chat flow (including its own Web UI), so no external MCP client is
+needed:
 
 ```text
-Chat client / llama.cpp Web UI ──► llama-server ── stdio ──► coreutils MCP server
+Chat client / llama.cpp Web UI ──► llama-server ── stdio ──► coreutils MCP server (+ optional webutils-mcp)
 ```
 
-See [Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
+See [Bundled MCP tools inside llama.cpp](#bundled-mcp-tools-inside-llamacpp)
 below.
 
 The agent (`internal/agent`):
@@ -63,9 +65,9 @@ The agent (`internal/agent`):
 1. Validates configuration (workspace must exist; URLs must be http/https).
 2. Connects to `llama-server` and to the coreutils MCP server (a child
    process started over stdio).
-3. Performs MCP `initialize` / `tools/list` and keeps only tools on the
-   built-in allowlist (`internal/agent/agent.go: AllowedTools`); anything
-   else the MCP server might advertise is logged and rejected.
+3. Performs MCP `initialize` / `tools/list` and keeps only tools on built-in
+   allowlists (`internal/agent/agent.go`), so unexpected tools are logged and
+   rejected.
 4. Picks a small, deterministic tool profile for the prompt
    (`internal/agent/profiles.go`) so only a handful of relevant tool
    schemas are sent to the model at once (max 6).
@@ -110,6 +112,10 @@ It also exposes bounded workspace tools:
 - inspection/search: `pwd`, `ls`, `cat`, `head`, `tail`, `grep`, and `find`
 - file management: `touch`, `write_file`, `mkdir`, `cp`, `mv`, `rm`, and `rmdir`
 
+When `webutils-mcp` is explicitly enabled and allowlisted, the agent can also
+expose `browse_url` (closed schema: `url` plus optional `max_text_chars`).
+`capture_screenshot` is intentionally not implemented in this MVP.
+
 `cat` is the bounded "print file content" tool. `grep` supports searching either
 one workspace file (`path`) or supplied text (`text`) and always returns bounded
 line-oriented matches (`line:text`). `find` recursively searches below a
@@ -129,15 +135,14 @@ rejected.
   schema-validated arguments; there is no `sh -c`, `exec.Command` with a
   shell, or string concatenation into a command line anywhere in the tool
   dispatch path.
-- **No filesystem or network access.** The exposed utilities operate only on
-  supplied text; no command accepts a path or invokes a subprocess.
+- **No arbitrary network tools by default.** Coreutils/workspace tools do not
+  fetch from the network. Browser access is a separate opt-in MCP server.
 - **Bounded I/O.** Input is capped at 64 KiB, each argument at 4 KiB (up to
   32 arguments), stdout at 256 KiB, and every call is subject to the server
   deadline.
 - **Allowlist, not trust-the-server.** The agent filters MCP `tools/list`
-  results against its own hard-coded `AllowedTools`, so even if the MCP
-  server were modified or replaced, the agent will not send unexpected
-  tool schemas to the model or execute unexpected tool calls.
+  results against hard-coded core and web allowlists. Browser tools are not
+  advertised or executable unless `--web-mcp-command` is explicitly set.
 - **Local-only inference.** `llama-server` is only reachable via
   `--llama-url`, which must be an `http://` or `https://` URL; the
   container entrypoint wires this to the colocated `llama-server`
@@ -147,6 +152,11 @@ rejected.
   closed-schema workspace operations (`touch`, `write_file`, `mkdir`, `cp`,
   `mv`, `rm`, `rmdir`). There is still no `apply_patch`, `exec_command`, or
   arbitrary command runner in this design.
+- **Web browsing is public-HTTPS only (opt-in).** `browse_url` enforces HTTPS,
+  rejects localhost/private/link-local/etc destinations (including DNS
+  answers), intercepts Chromium requests to apply the same policy to
+  redirects/frames/subresources, and runs each call in a fresh temporary
+  Chromium profile with a hard timeout.
 
 ## Prerequisites
 
@@ -165,12 +175,14 @@ go vet ./...
 go test ./...
 ```
 
-This builds two binaries from `cmd/`:
+This builds three binaries from `cmd/`:
 
 - `cmd/agent` → the CLI agent (`groovy-agent`)
 - `cmd/coreutils-mcp` → the standalone coreutils MCP server
+- `cmd/webutils-mcp` → the optional Chromium browsing MCP server
 
-The implementation has no third-party runtime or build dependencies.
+The web browsing integration depends on `chromedp`/CDP Go packages; Chromium
+itself is provided by the runtime environment (or bundled Docker image).
 
 ## Model download (no GGUF committed to git)
 
@@ -197,11 +209,12 @@ files are ignored by git (see `.gitignore`).
      --ctx-size 8192 --jinja
    ```
 
-3. Build the binaries and run the agent, pointing it at the MCP server
-   binary and a workspace directory:
+3. Build the binaries and run the agent, pointing it at the coreutils MCP
+   server and a workspace directory:
 
    ```sh
    go build -o bin/coreutils-mcp ./cmd/coreutils-mcp
+   go build -o bin/webutils-mcp ./cmd/webutils-mcp
    go build -o bin/groovy-agent ./cmd/agent
    ./bin/groovy-agent \
      --llama-url http://127.0.0.1:8080 \
@@ -211,13 +224,18 @@ files are ignored by git (see `.gitignore`).
      "what is the sha256sum of go.mod?"
    ```
 
+4. Optional: enable browsing for public HTTPS pages by explicitly adding
+   `--web-mcp-command ./bin/webutils-mcp`.
+
 ## Running the Docker image (llama.cpp + agent bundled)
 
-The `Dockerfile` builds both Go binaries, layers them on top of the
+The `Dockerfile` builds the Go binaries (`groovy-agent`, `coreutils-mcp`,
+`webutils-mcp`), layers them on top of the
 official `llama.cpp` server image, and wires everything together with
 `docker/entrypoint.sh`, which starts `llama-server`, waits for it to
 become healthy, then runs `groovy-agent` with the bundled MCP server
-configured.
+configured. The runtime image also installs Chromium, CA certificates, and
+fonts required by `webutils-mcp` when browsing is opted in.
 
 When using the published image from GHCR, the Phi-4 workflow now pushes:
 
@@ -291,10 +309,10 @@ The OpenAI-compatible API is then available at
 on trusted networks. Because the bundled coreutils MCP server is
 registered with it (see below), `llama-server` restricts CORS origins to
 localhost; pass `LLAMA_EXTRA_ARGS="--cors-origins <origin>"` if a browser
-served from another origin has to reach it, or disable the tool set with
-`LLAMA_MCP_COREUTILS=0`.
+served from another origin has to reach it, or disable bundled MCP tools with
+`LLAMA_MCP_COREUTILS=0 LLAMA_MCP_WEBUTILS=0`.
 
-### Coreutils tools inside llama.cpp
+### Bundled MCP tools inside llama.cpp
 
 The pinned `llama.cpp` build (`build 10481`, commit `25ae3a9b3`) is an MCP
 client itself: it spawns the MCP servers listed in `--mcp-servers-json`
@@ -303,19 +321,22 @@ startup and offers them to the model through its OpenAI-compatible tool
 calling, exposing them on its internal `GET /tools` endpoint that the
 built-in Web UI consumes.
 
-`docker/entrypoint.sh` therefore registers the bundled read-only
-`coreutils-mcp` binary with `llama-server` automatically whenever
-`llama-server` is started (both the API-server mode and the one-shot
-prompt mode). Nothing extra has to be started or published, and the
-startup logs show the discovery:
+`docker/entrypoint.sh` therefore registers bundled MCP servers with
+`llama-server` over stdio:
+
+- `coreutils-mcp` by default (`LLAMA_MCP_COREUTILS=1`);
+- `webutils-mcp` only when explicitly opted in (`LLAMA_MCP_WEBUTILS=1`).
+
+Nothing extra has to be started or published, and startup logs show discovery:
 
 ```text
 srv start: MCP warmup: 'coreutils' discovered 16 tools
-srv setup: Added 16 MCP tools
+srv start: MCP warmup: 'webutils' discovered 1 tools
+srv setup: Added 17 MCP tools
 ```
 
-The tools then appear in the built-in Web UI's tool list as
-`coreutils_pwd`, `coreutils_read_file`, ... and can be enabled per chat.
+The tools appear in the built-in Web UI as `coreutils_*` and (when enabled)
+`webutils_browse_url`.
 
 Usage and limitations:
 
@@ -360,9 +381,9 @@ Usage and limitations:
 - `llama-server` owns the lifetime of the MCP child process: it spawns it
   on demand and shuts it down when it exits, so stopping the container
   leaves nothing behind.
-- Set `LLAMA_MCP_COREUTILS=0` to start `llama-server` without any MCP tool
-  set, and `LLAMA_MCP_WORKSPACE=/some/dir` to confine the tools to a
-  different mounted directory.
+- Set `LLAMA_MCP_COREUTILS=0` and `LLAMA_MCP_WEBUTILS=0` to start
+  `llama-server` without bundled MCP tools. `LLAMA_MCP_WORKSPACE=/some/dir`
+  changes only the coreutils workspace.
 
 ```sh
 docker run --rm \
@@ -413,7 +434,7 @@ the pinned build speaks the stdio transport only, so it will never
 connect to this HTTP endpoint no matter which port you give it. To use
 the coreutils tools from llama.cpp, use the built-in registration
 described in
-[Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
+[Bundled MCP tools inside llama.cpp](#bundled-mcp-tools-inside-llamacpp)
 instead. For any other MCP-capable client, connect directly to the
 Streamable HTTP endpoint, for example:
 
@@ -523,6 +544,9 @@ Agent CLI flags (`cmd/agent`):
   to `llama-server`.
 - `--mcp-command` (default `./bin/coreutils-mcp`): path to the coreutils
   MCP server executable.
+- `--web-mcp-command` (default unset): optional path to a second MCP server
+  that may expose web browsing tools (currently `browse_url` from
+  `cmd/webutils-mcp`).
 - `--workspace` (default `.`): directory that bounds every filesystem
   operation performed by the MCP tools.
 - remaining arguments are joined as the prompt.
@@ -540,6 +564,14 @@ Agent CLI flags (`cmd/agent`):
 - `--http-token` (default unset, `--transport=http` only): if set,
   requests must carry a matching bearer authorization header; if unset,
   the server logs a warning and accepts unauthenticated requests.
+
+`webutils-mcp` (`cmd/webutils-mcp`) serves only stdio MCP and exposes a
+single closed-schema tool:
+
+- `browse_url` arguments:
+  - `url` (required, HTTPS only)
+  - `max_text_chars` (optional, bounded)
+- `capture_screenshot` is intentionally not part of this MVP schema.
 
 Container/`docker/entrypoint.sh` environment variables:
 
@@ -576,21 +608,22 @@ Container/`docker/entrypoint.sh` environment variables:
   sampling guardrails that curb small-model repetition loops
 - `LLAMA_MCP_COREUTILS` (default `1`): register the bundled read-only
   coreutils MCP server with `llama-server` over stdio; set to `0` to
-  start `llama-server` without any MCP tool set (this also implies no
-  `--ui-mcp-proxy`, since it is only ever added alongside this
-  registration)
+  disable only this server.
+- `LLAMA_MCP_WEBUTILS` (default `0`): opt in to registering the bundled
+  `webutils-mcp` server with `llama-server` over stdio.
 - `LLAMA_MCP_UI_PROXY` (default `1`, only relevant when
-  `LLAMA_MCP_COREUTILS` is enabled): start `llama-server` with
+  either `LLAMA_MCP_COREUTILS` or `LLAMA_MCP_WEBUTILS` is enabled): start `llama-server` with
   `--ui-mcp-proxy`, letting the built-in Web UI's browser JavaScript reach
   further MCP servers registered from its own Settings panel; set to `0`
-  to keep the bundled coreutils tools without this separate, Web-UI-only
+  to keep bundled MCP servers without this separate, Web-UI-only
   feature (see
-  [Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
+  [Bundled MCP tools inside llama.cpp](#bundled-mcp-tools-inside-llamacpp)
   above)
 - `LLAMA_MCP_WORKSPACE` (default `${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}`):
-  directory the registered MCP tools are confined to (see
-  [Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)
-  above)
+  workspace for the coreutils MCP server (webutils has no workspace access).
+- `AGENT_WEB_MCP_COMMAND` (default unset): when set, entrypoint passes
+  `--web-mcp-command` to one-shot `groovy-agent`, enabling agent-side
+  browsing tool discovery from that server.
 - `AGENT_OUTPUT_DIR` (default `/output` in the container)
 - `MCP_HTTP_HOST` (default `0.0.0.0`), `MCP_HTTP_PORT` (default `8765`),
   `MCP_HTTP_PATH` (default `/mcp`), `MCP_HTTP_TOKEN` (default unset), and
@@ -673,7 +706,7 @@ MCP client in the pinned build only spawns MCP servers over stdio from
 the server-side `--mcp-servers-json`/`--mcp-servers-config` flags. To use
 the coreutils tool set from llama.cpp, rely on the automatic stdio
 registration performed by the image
-([Coreutils tools inside llama.cpp](#coreutils-tools-inside-llamacpp)).
+([Bundled MCP tools inside llama.cpp](#bundled-mcp-tools-inside-llamacpp)).
 
 ## Removed / out of scope
 
