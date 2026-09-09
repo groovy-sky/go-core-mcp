@@ -14,7 +14,7 @@ const MaxExposedTools = 6
 // FallbackProfile is used when no profile matches confidently.
 var FallbackProfile = Profile{
 	Name:  "fallback",
-	Tools: []string{"pwd", "ls", "cat", "grep", "coreutils_run", "touch"},
+	Tools: []string{"pwd", "ls", "cat", "grep", "find", "coreutils_run"},
 }
 
 // profiles are evaluated in this fixed order so selection is deterministic.
@@ -27,8 +27,16 @@ var profiles = []struct {
 		keywords: []string{"date", "time", "clock", "timestamp", "today", "utc", "current time"},
 	},
 	{
-		profile:  Profile{Name: "file_search", Tools: []string{"ls", "grep", "head", "cat"}},
+		profile:  Profile{Name: "text_search", Tools: []string{"grep"}},
+		keywords: []string{"search text", "grep text", "supplied text", "input text", "string search", "search this text", "matching lines"},
+	},
+	{
+		profile:  Profile{Name: "file_search", Tools: []string{"find", "grep", "ls", "head", "cat"}},
 		keywords: []string{"grep", "search", "find occurrences", "occurrence", "occurrences", "matches", "matching", "pattern", "todo", "look for", "contains"},
+	},
+	{
+		profile:  Profile{Name: "filesystem_find", Tools: []string{"find", "ls", "cat", "grep"}},
+		keywords: []string{"find file", "find files", "find directory", "find directories", "locate", "recursive", "under", "walk"},
 	},
 	{
 		profile:  Profile{Name: "file_inspection", Tools: []string{"pwd", "ls", "cat", "head", "tail", "coreutils_run"}},
@@ -43,8 +51,16 @@ var profiles = []struct {
 		keywords: []string{"sort", "unique", "uniq", "duplicate", "base64", "encode", "decode", "translate characters", "fields", "column", "columns", "cut", "merge lines"},
 	},
 	{
-		profile:  Profile{Name: "file_management", Tools: []string{"ls", "mkdir", "touch", "cp", "mv", "rm"}},
-		keywords: []string{"touch", "create", "new", "empty", "mkdir", "directory", "copy", "move", "rename", "remove", "delete", "create file", "new file", "empty file"},
+		profile:  Profile{Name: "file_write", Tools: []string{"ls", "cat", "write_file", "mkdir", "touch"}},
+		keywords: []string{"write", "append", "overwrite", "save", "write to", "update file", "write file", "edit file"},
+	},
+	{
+		profile:  Profile{Name: "file_management", Tools: []string{"ls", "mkdir", "touch", "write_file", "cp", "mv"}},
+		keywords: []string{"touch", "create", "new", "empty", "mkdir", "directory", "copy", "move", "rename", "create file", "new file", "empty file"},
+	},
+	{
+		profile:  Profile{Name: "file_cleanup", Tools: []string{"ls", "rm", "rmdir"}},
+		keywords: []string{"remove", "delete"},
 	},
 }
 

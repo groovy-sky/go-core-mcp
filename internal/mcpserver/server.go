@@ -1,5 +1,5 @@
 // Package mcpserver implements the coreutils MCP server. It speaks JSON-RPC
-// 2.0 over stdio, exposes a read-only coreutils tool set, and enforces the
+// 2.0 over stdio, exposes bounded workspace and text tools, and enforces the
 // workspace boundary and the resource limits from PLAN.md.
 package mcpserver
 
@@ -21,21 +21,25 @@ import (
 
 // Limits are the bounded execution defaults from PLAN.md.
 type Limits struct {
-	MaxResultBytes   int
-	MaxFileReadBytes int
-	MaxGrepMatches   int
-	MaxLineBytes     int
-	MaxDuration      time.Duration
+	MaxResultBytes    int
+	MaxFileReadBytes  int
+	MaxFileWriteBytes int
+	MaxGrepMatches    int
+	MaxFindResults    int
+	MaxLineBytes      int
+	MaxDuration       time.Duration
 }
 
 // DefaultLimits returns the PLAN.md defaults.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxResultBytes:   16 << 10,
-		MaxFileReadBytes: 12 << 10,
-		MaxGrepMatches:   20,
-		MaxLineBytes:     2 << 10,
-		MaxDuration:      10 * time.Second,
+		MaxResultBytes:    16 << 10,
+		MaxFileReadBytes:  12 << 10,
+		MaxFileWriteBytes: 64 << 10,
+		MaxGrepMatches:    20,
+		MaxFindResults:    200,
+		MaxLineBytes:      2 << 10,
+		MaxDuration:       10 * time.Second,
 	}
 }
 

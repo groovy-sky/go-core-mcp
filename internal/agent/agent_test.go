@@ -76,8 +76,11 @@ func TestSelectProfileIsDeterministic(t *testing.T) {
 	cases := map[string]string{
 		"Use the date tool and report the exact current time.":     "date",
 		"Find occurrences of \"TODO\" in README.md.":               "file_search",
+		"Find files named config recursively under internal.":      "filesystem_find",
+		"Grep text and return matching lines only.":                "text_search",
 		"Show the current workspace path and identify its README.": "file_inspection",
 		"Read the beginning of README.md and summarize it.":        "file_inspection",
+		"Write to notes.txt in the workspace and save it.":         "file_write",
 		"Count the unique sorted lines in the supplied text.":      "text_processing",
 		"Give me the basename of docs/guide.md":                    "path_processing",
 		"Explain quantum entanglement":                             "fallback",

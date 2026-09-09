@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/groovy-sky/groovy-agent/coreutils"
@@ -22,6 +24,8 @@ const maxHashBytes = 1 << 20
 // maxCopyBytes bounds copy operations so a single request cannot exhaust the
 // server's time or memory budget.
 const maxCopyBytes = 1 << 20
+
+var errFindLimitReached = errors.New("find limit reached")
 
 // WriteCapableTools remain intentionally unavailable because they exceed the
 // narrowly scoped filesystem operations implemented by this server.
@@ -60,6 +64,14 @@ func pathField() map[string]any {
 }
 
 func definitions() []tool {
+	grepSchema := object(map[string]any{
+		"path":        pathField(),
+		"text":        stringField("Supplied UTF-8 text to search. Provide exactly one of path or text.", 12<<10),
+		"pattern":     stringField("Pattern to search for.", 256),
+		"ignore_case": boolField("Case-insensitive search."),
+		"fixed":       boolField("Treat the pattern as literal text."),
+		"max_matches": intField("Maximum matches.", 1, 20),
+	}, "pattern")
 	return []tool{
 		{
 			name:        "pwd",
@@ -77,7 +89,7 @@ func definitions() []tool {
 		},
 		{
 			name:        "cat",
-			description: "Read a bounded workspace text file.",
+			description: "Print bounded workspace file content to the console output.",
 			schema: object(map[string]any{
 				"path":      pathField(),
 				"max_bytes": intField("Maximum bytes to read.", 1, 12<<10),
@@ -102,19 +114,38 @@ func definitions() []tool {
 		},
 		{
 			name:        "grep",
-			description: "Search a workspace text file for a pattern.",
+			description: "Search a workspace file or supplied text for matching lines.",
+			schema:      grepSchema,
+			run:         runGrep,
+		},
+		{
+			name:        "find",
+			description: "Recursively find files and directories under a workspace path by name substring or glob.",
 			schema: object(map[string]any{
-				"path": pathField(), "pattern": stringField("Pattern to search for.", 256),
-				"ignore_case": boolField("Case-insensitive search."), "fixed": boolField("Treat the pattern as literal text."),
-				"max_matches": intField("Maximum matches.", 1, 20),
-			}, "path", "pattern"),
-			run: runGrep,
+				"path":        pathField(),
+				"name":        stringField("Name pattern to match against each entry base name.", 256),
+				"match_mode":  map[string]any{"type": "string", "description": "Match mode.", "enum": []any{"substring", "glob"}},
+				"ignore_case": boolField("Case-insensitive matching."),
+				"max_results": intField("Maximum number of results.", 1, 200),
+			}, "name"),
+			run: runFind,
 		},
 		{
 			name:        "touch",
 			description: "Create an empty workspace file or update its modification time.",
 			schema:      object(map[string]any{"path": pathField()}, "path"),
 			run:         runTouch,
+		},
+		{
+			name:        "write_file",
+			description: "Write bounded UTF-8 text to a workspace file. Existing files require overwrite:true or append:true.",
+			schema: object(map[string]any{
+				"path":      pathField(),
+				"content":   stringField("UTF-8 content to write.", 64<<10),
+				"overwrite": boolField("Replace an existing file (truncate before writing)."),
+				"append":    boolField("Append to an existing file instead of replacing it."),
+			}, "path", "content"),
+			run: runWriteFile,
 		},
 		{
 			name:        "mkdir",
@@ -499,9 +530,10 @@ func runWC(_ context.Context, s *Server, arguments map[string]any) (payload, err
 }
 
 func runGrep(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
-	path, err := requireString(arguments, "path")
-	if err != nil {
-		return payload{}, err
+	_, hasPath := arguments["path"]
+	_, hasText := arguments["text"]
+	if hasPath == hasText {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "provide exactly one of \"path\" or \"text\"")
 	}
 	pattern, err := requireString(arguments, "pattern")
 	if err != nil {
@@ -511,9 +543,23 @@ func runGrep(_ context.Context, s *Server, arguments map[string]any) (payload, e
 	if maxMatches > s.limits.MaxGrepMatches {
 		maxMatches = s.limits.MaxGrepMatches
 	}
-	content, truncated, err := s.readFile(path, s.limits.MaxFileReadBytes)
-	if err != nil {
-		return payload{}, err
+	content := ""
+	truncated := false
+	path := ""
+	if hasPath {
+		path, err = requireString(arguments, "path")
+		if err != nil {
+			return payload{}, err
+		}
+		content, truncated, err = s.readFile(path, s.limits.MaxFileReadBytes)
+		if err != nil {
+			return payload{}, err
+		}
+	} else {
+		content, err = s.requireText(arguments, "text")
+		if err != nil {
+			return payload{}, err
+		}
 	}
 	matches, cut, err := coreutils.Grep(content, coreutils.GrepOptions{
 		Pattern:    pattern,
@@ -531,7 +577,193 @@ func runGrep(_ context.Context, s *Server, arguments map[string]any) (payload, e
 	return payload{
 		Output:    coreutils.JoinLines(lines),
 		Truncated: truncated || cut,
-		Metadata:  map[string]any{"path": path, "matches": len(matches)},
+		Metadata:  map[string]any{"path": path, "source": map[bool]string{true: "path", false: "text"}[hasPath], "matches": len(matches)},
+	}, nil
+}
+
+func runFind(ctx context.Context, s *Server, arguments map[string]any) (payload, error) {
+	name, err := requireString(arguments, "name")
+	if err != nil {
+		return payload{}, err
+	}
+	if strings.TrimSpace(name) == "" {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "\"name\" must not be empty")
+	}
+	relative, _ := arguments["path"].(string)
+	if relative == "" {
+		relative = "."
+	}
+	mode, _ := arguments["match_mode"].(string)
+	if mode == "" {
+		mode = "substring"
+	}
+	ignoreCase := optionalBool(arguments, "ignore_case")
+	maxResults := optionalInt(arguments, "max_results", s.limits.MaxFindResults)
+	if maxResults > s.limits.MaxFindResults {
+		maxResults = s.limits.MaxFindResults
+	}
+	root, err := s.resolvePath(relative)
+	if err != nil {
+		return payload{}, err
+	}
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "path is not a directory")
+	}
+
+	lines := make([]string, 0, maxResults)
+	fileCount := 0
+	directoryCount := 0
+	truncated := false
+
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkError error) error {
+		if walkError != nil {
+			return walkError
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		if !s.inside(path) {
+			return fail(mcpproto.ErrorWorkspaceViolation, "path escapes the workspace")
+		}
+		entryType := ""
+		switch {
+		case entry.IsDir():
+			entryType = "directory"
+		case entry.Type().IsRegular():
+			entryType = "file"
+		default:
+			return nil
+		}
+		matched, err := findNameMatches(entry.Name(), name, mode, ignoreCase)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			return nil
+		}
+		relativePath := s.relativePath(path)
+		if entryType == "directory" {
+			directoryCount++
+			lines = append(lines, relativePath+"/")
+		} else {
+			fileCount++
+			lines = append(lines, relativePath)
+		}
+		if len(lines) >= maxResults {
+			truncated = true
+			return errFindLimitReached
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, errFindLimitReached) {
+		var typed *toolError
+		if errors.As(walkErr, &typed) {
+			return payload{}, typed
+		}
+		return payload{}, fail(mcpproto.ErrorToolError, "path could not be searched")
+	}
+
+	return payload{
+		Output:    coreutils.JoinLines(lines),
+		Truncated: truncated,
+		Metadata: map[string]any{
+			"path":        relative,
+			"name":        name,
+			"match_mode":  mode,
+			"files":       fileCount,
+			"directories": directoryCount,
+			"matches":     len(lines),
+		},
+	}, nil
+}
+
+func findNameMatches(candidate, name, mode string, ignoreCase bool) (bool, error) {
+	left := candidate
+	right := name
+	if ignoreCase {
+		left = strings.ToLower(left)
+		right = strings.ToLower(right)
+	}
+	switch mode {
+	case "substring":
+		return strings.Contains(left, right), nil
+	case "glob":
+		matched, err := filepath.Match(right, left)
+		if err != nil {
+			return false, fail(mcpproto.ErrorInvalidArguments, "glob pattern is invalid")
+		}
+		return matched, nil
+	default:
+		return false, fail(mcpproto.ErrorInvalidArguments, "\"match_mode\" must be \"substring\" or \"glob\"")
+	}
+}
+
+func runWriteFile(_ context.Context, s *Server, arguments map[string]any) (payload, error) {
+	relative, err := requireString(arguments, "path")
+	if err != nil {
+		return payload{}, err
+	}
+	content, err := requireString(arguments, "content")
+	if err != nil {
+		return payload{}, err
+	}
+	if len(content) > s.limits.MaxFileWriteBytes {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "content exceeds the allowed size")
+	}
+	appendMode := optionalBool(arguments, "append")
+	overwrite := optionalBool(arguments, "overwrite")
+	if appendMode && overwrite {
+		return payload{}, fail(mcpproto.ErrorInvalidArguments, "set only one of overwrite or append")
+	}
+
+	path, err := s.resolveTouchPath(relative)
+	if err != nil {
+		return payload{}, err
+	}
+	if info, statErr := os.Lstat(path); statErr == nil {
+		if info.IsDir() {
+			return payload{}, fail(mcpproto.ErrorInvalidArguments, "path is a directory, not a file")
+		}
+		if !info.Mode().IsRegular() {
+			return payload{}, fail(mcpproto.ErrorInvalidArguments, "path is not a regular file")
+		}
+		if !appendMode && !overwrite {
+			return payload{}, fail(mcpproto.ErrorInvalidArguments, "file exists; set overwrite or append explicitly")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return payload{}, fail(mcpproto.ErrorToolError, "path could not be inspected")
+	}
+
+	flags := os.O_WRONLY | os.O_CREATE
+	if appendMode {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	file, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		if os.IsPermission(err) {
+			return payload{}, fail(mcpproto.ErrorPermissionDenied, "file could not be written")
+		}
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be written")
+	}
+	_, writeErr := file.WriteString(content)
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		return payload{}, fail(mcpproto.ErrorToolError, "file could not be written")
+	}
+	return payload{
+		Output: relative,
+		Metadata: map[string]any{
+			"path":      relative,
+			"bytes":     len(content),
+			"append":    appendMode,
+			"overwrite": overwrite,
+		},
 	}, nil
 }
 

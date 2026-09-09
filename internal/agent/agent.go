@@ -43,9 +43,9 @@ Use JSON arguments matching the tool schema.
 After receiving results, answer concisely.
 Do not repeat large tool output unless requested.`
 
-// AllowedTools is the default read-only coreutils policy.
+// AllowedTools is the default bounded MCP tool policy.
 var AllowedTools = []string{
-	"cat", "coreutils_run", "cp", "grep", "head", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "tail", "touch",
+	"cat", "coreutils_run", "cp", "find", "grep", "head", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "tail", "touch", "write_file",
 }
 
 // Config holds the validated CLI configuration.
@@ -169,7 +169,7 @@ func Run(ctx context.Context, config Config, stdout io.Writer, stderr io.Writer)
 	return session.Loop(ctx)
 }
 
-// FilterDiscovered keeps only tools allowed by the read-only policy. Unexpected
+// FilterDiscovered keeps only tools allowed by policy. Unexpected
 // tools are logged and denied.
 func FilterDiscovered(tools []mcpproto.Tool, logger *log.Logger) map[string]mcpproto.Tool {
 	allowed := make(map[string]struct{}, len(AllowedTools))

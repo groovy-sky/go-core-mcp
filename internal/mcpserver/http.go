@@ -31,7 +31,7 @@ type HTTPOptions struct {
 	// authorization header matching this value (RFC 6750). This is the
 	// minimum bar for publishing the endpoint beyond loopback: without a
 	// token, anyone who can reach the listening address gets unauthenticated
-	// access to the bounded read-only filesystem tools.
+	// access to the bounded filesystem tools.
 	BearerToken string
 }
 
