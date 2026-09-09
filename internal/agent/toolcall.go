@@ -17,9 +17,11 @@ import (
 // requestedLimits caps the bounded arguments the model may ask for. The model
 // can never raise a safety limit.
 var requestedLimits = map[string]int{
-	"max_bytes":   12 << 10,
-	"lines":       200,
-	"max_matches": 20,
+	"max_bytes":     12 << 10,
+	"lines":         200,
+	"max_matches":   200,
+	"max_results":   200,
+	"context_lines": 5,
 }
 
 // validationError describes a rejected tool call.
@@ -105,7 +107,7 @@ func (s *Session) validateCall(exposed map[string]mcpproto.Tool, call llm.ToolCa
 				return nil, mcpproto.Tool{}, reject(mcpproto.ErrorInvalidArguments, "%q exceeds the configured limit", key)
 			}
 		}
-		if key != "path" {
+		if key != "path" && key != "root" {
 			continue
 		}
 		path, ok := value.(string)
