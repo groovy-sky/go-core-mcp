@@ -40,12 +40,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_TAG }}
+            type=sha,format=long,prefix=${{ env.IMAGE_TAG }}-
+            type=raw,value=${{ env.IMAGE_TAG }}-run-${{ github.run_number }}
+
       - name: Build and push image with Phi-4-mini-instruct.Q8_0
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
           build-args: |
             DOWNLOAD_MODEL=1
           secrets: |
