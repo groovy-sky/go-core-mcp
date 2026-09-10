@@ -43,19 +43,24 @@ Use JSON arguments matching the tool schema.
 After receiving results, answer concisely.
 Do not repeat large tool output unless requested.`
 
-// AllowedTools is the default bounded MCP tool policy.
-var AllowedTools = []string{
+// AllowedCoreTools is the default bounded MCP tool policy.
+var AllowedCoreTools = []string{
 	"cat", "coreutils_run", "cp", "find", "grep", "head", "ls", "mkdir", "mv", "pwd", "rm", "rmdir", "tail", "touch", "write_file",
 }
 
+// AllowedWebTools are only considered when an explicit web MCP command is set.
+var AllowedWebTools = []string{"browse_url"}
+
 // Config holds the validated CLI configuration.
 type Config struct {
-	LlamaURL   string
-	Model      string
-	MCPCommand string
-	MCPArgs    []string
-	Workspace  string
-	Prompt     string
+	LlamaURL      string
+	Model         string
+	MCPCommand    string
+	MCPArgs       []string
+	WebMCPCommand string
+	WebMCPArgs    []string
+	Workspace     string
+	Prompt        string
 }
 
 // Validate checks the configuration and canonicalizes the workspace.
@@ -98,7 +103,7 @@ func (c *Config) Validate() error {
 type Session struct {
 	config     Config
 	model      modelClient
-	mcp        toolClient
+	clients    map[string]toolClient
 	discovered map[string]mcpproto.Tool
 	logger     *log.Logger
 	out        io.Writer
@@ -135,25 +140,46 @@ func Run(ctx context.Context, config Config, stdout io.Writer, stderr io.Writer)
 
 	args := append([]string{}, config.MCPArgs...)
 	args = append(args, "--workspace", config.Workspace)
-	client, err := mcpclient.StartProcess(mcpCtx, config.MCPCommand, args, config.Workspace, stderr)
+	coreClient, err := mcpclient.StartProcess(mcpCtx, config.MCPCommand, args, config.Workspace, stderr)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer coreClient.Close()
 
 	startupCtx, cancelStartup := context.WithTimeout(ctx, MCPStartupTimeout)
 	defer cancelStartup()
-	info, err := client.Initialize(startupCtx)
+	info, err := coreClient.Initialize(startupCtx)
 	if err != nil {
 		return fmt.Errorf("MCP session could not be established: %w", err)
 	}
 	logger.Printf("MCP server %s %s ready", info.ServerInfo.Name, info.ServerInfo.Version)
 
-	tools, err := client.ListTools(startupCtx)
+	tools, err := coreClient.ListTools(startupCtx)
 	if err != nil {
 		return fmt.Errorf("tool discovery failed: %w", err)
 	}
-	discovered := FilterDiscovered(tools, logger)
+	discovered := FilterDiscovered(tools, AllowedCoreTools, logger)
+	clients := map[string]toolClient{}
+	for name := range discovered {
+		clients[name] = coreClient
+	}
+
+	if strings.TrimSpace(config.WebMCPCommand) != "" {
+		webClient, webDiscovered, err := startWebMCPServer(mcpCtx, startupCtx, config, stderr, logger)
+		if err != nil {
+			return err
+		}
+		defer webClient.Close()
+		for name, definition := range webDiscovered {
+			if _, exists := discovered[name]; exists {
+				logger.Printf("denied duplicate tool %q advertised by web MCP server", name)
+				continue
+			}
+			discovered[name] = definition
+			clients[name] = webClient
+		}
+	}
+
 	if len(discovered) == 0 {
 		return errors.New("no allowed tools were discovered")
 	}
@@ -161,7 +187,7 @@ func Run(ctx context.Context, config Config, stdout io.Writer, stderr io.Writer)
 	session := &Session{
 		config:     config,
 		model:      model,
-		mcp:        client,
+		clients:    clients,
 		discovered: discovered,
 		logger:     logger,
 		out:        stdout,
@@ -171,9 +197,9 @@ func Run(ctx context.Context, config Config, stdout io.Writer, stderr io.Writer)
 
 // FilterDiscovered keeps only tools allowed by policy. Unexpected
 // tools are logged and denied.
-func FilterDiscovered(tools []mcpproto.Tool, logger *log.Logger) map[string]mcpproto.Tool {
-	allowed := make(map[string]struct{}, len(AllowedTools))
-	for _, name := range AllowedTools {
+func FilterDiscovered(tools []mcpproto.Tool, allowlist []string, logger *log.Logger) map[string]mcpproto.Tool {
+	allowed := make(map[string]struct{}, len(allowlist))
+	for _, name := range allowlist {
 		allowed[name] = struct{}{}
 	}
 	kept := make(map[string]mcpproto.Tool, len(tools))
@@ -191,13 +217,33 @@ func FilterDiscovered(tools []mcpproto.Tool, logger *log.Logger) map[string]mcpp
 	sort.Strings(names)
 	if logger != nil {
 		logger.Printf("discovered tools: %s", strings.Join(names, ", "))
-		for _, name := range AllowedTools {
+		for _, name := range allowlist {
 			if _, ok := kept[name]; !ok {
 				logger.Printf("warning: allowed tool %q was not advertised", name)
 			}
 		}
 	}
 	return kept
+}
+
+func startWebMCPServer(mcpCtx context.Context, startupCtx context.Context, config Config, stderr io.Writer, logger *log.Logger) (*mcpclient.Client, map[string]mcpproto.Tool, error) {
+	webArgs := append([]string{}, config.WebMCPArgs...)
+	webClient, err := mcpclient.StartProcess(mcpCtx, config.WebMCPCommand, webArgs, config.Workspace, stderr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("start web MCP server: %w", err)
+	}
+	info, err := webClient.Initialize(startupCtx)
+	if err != nil {
+		webClient.Close()
+		return nil, nil, fmt.Errorf("web MCP session could not be established: %w", err)
+	}
+	logger.Printf("web MCP server %s %s ready", info.ServerInfo.Name, info.ServerInfo.Version)
+	tools, err := webClient.ListTools(startupCtx)
+	if err != nil {
+		webClient.Close()
+		return nil, nil, fmt.Errorf("web tool discovery failed: %w", err)
+	}
+	return webClient, FilterDiscovered(tools, AllowedWebTools, logger), nil
 }
 
 // Loop runs the bounded agent loop.

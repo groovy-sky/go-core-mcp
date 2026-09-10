@@ -60,10 +60,13 @@ func newSession(t *testing.T, workspace, prompt string, model modelClient) (*Ses
 	session := &Session{
 		config:     Config{Workspace: workspace, Prompt: prompt},
 		model:      model,
-		mcp:        client,
-		discovered: FilterDiscovered(tools, nil),
+		clients:    map[string]toolClient{},
+		discovered: FilterDiscovered(tools, AllowedCoreTools, nil),
 		logger:     log.New(io.Discard, "", 0),
 		out:        output,
+	}
+	for name := range session.discovered {
+		session.clients[name] = client
 	}
 	return session, output
 }
@@ -74,6 +77,7 @@ func toolCall(id, name, arguments string) llm.ToolCall {
 
 func TestSelectProfileIsDeterministic(t *testing.T) {
 	cases := map[string]string{
+		"Browse https://example.com and summarize it.":             "web_browse",
 		"Use the date tool and report the exact current time.":     "date",
 		"Find occurrences of \"TODO\" in README.md.":               "file_search",
 		"Find files named config recursively under internal.":      "filesystem_find",
@@ -106,10 +110,11 @@ func TestFilterDiscoveredDeniesUnexpectedTools(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object"}`)
 	tools := []mcpproto.Tool{
 		{Name: "coreutils_run", InputSchema: schema},
+		{Name: "browse_url", InputSchema: schema},
 		{Name: "unlink", InputSchema: schema},
 		{Name: "exec_command", InputSchema: schema},
 	}
-	kept := FilterDiscovered(tools, nil)
+	kept := FilterDiscovered(tools, AllowedCoreTools, nil)
 	if _, ok := kept["coreutils_run"]; !ok {
 		t.Fatal("allowed tool was dropped")
 	}
@@ -118,6 +123,18 @@ func TestFilterDiscoveredDeniesUnexpectedTools(t *testing.T) {
 	}
 	if _, ok := kept["exec_command"]; ok {
 		t.Fatal("unexpected tool must be denied")
+	}
+	if _, ok := kept["browse_url"]; ok {
+		t.Fatal("web tool must be denied from the core allowlist")
+	}
+}
+
+func TestFilterDiscoveredAllowsWebToolOnlyInWebAllowlist(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object"}`)
+	tools := []mcpproto.Tool{{Name: "browse_url", InputSchema: schema}}
+	kept := FilterDiscovered(tools, AllowedWebTools, nil)
+	if _, ok := kept["browse_url"]; !ok {
+		t.Fatal("browse_url must be allowed in the explicit web allowlist")
 	}
 }
 
