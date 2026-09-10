@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ const (
 	maxAllowedTextChars     = 12000
 	defaultMaxLinks         = 40
 	defaultMaxLinkTextChars = 200
+	chromeExecutableEnvVar  = "WEBUTILS_CHROME_EXECUTABLE"
+	defaultChromeExecutable = "/usr/bin/chromium"
 )
 
 type Limits struct {
@@ -85,6 +88,10 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	if err != nil {
 		return BrowseResult{}, err
 	}
+	execPath, err := resolveChromeExecutablePath()
+	if err != nil {
+		return BrowseResult{}, err
+	}
 
 	profileDir, err := os.MkdirTemp("", "webutils-chromium-*")
 	if err != nil {
@@ -99,7 +106,8 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	allocatorOptions := append(chromedp.DefaultExecAllocatorOptions[:],
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{chromedp.ExecPath(execPath)}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
 		chromedp.UserDataDir(profileDir),
 		chromedp.Headless,
 		chromedp.DisableGPU,
@@ -229,4 +237,40 @@ func clampString(value string, limit int) (string, bool) {
 		return value, false
 	}
 	return value[:limit], true
+}
+
+func resolveChromeExecutablePath() (string, error) {
+	return resolveChromeExecutable(os.LookupEnv, os.Stat, defaultChromeExecutable)
+}
+
+func resolveChromeExecutable(lookupEnv func(string) (string, bool), stat func(string) (fs.FileInfo, error), defaultPath string) (string, error) {
+	if configured, ok := lookupEnv(chromeExecutableEnvVar); ok {
+		if configured = strings.TrimSpace(configured); configured != "" {
+			if err := validateExecutablePath(configured, stat); err != nil {
+				return "", fmt.Errorf("%s=%q is not usable: %w. Install Chrome/Chromium at that path or unset %s to use %q instead. Snap-wrapper chromium-browser launchers are unsupported in this container", chromeExecutableEnvVar, configured, err, chromeExecutableEnvVar, defaultPath)
+			}
+			return configured, nil
+		}
+	}
+	if err := validateExecutablePath(defaultPath, stat); err != nil {
+		return "", fmt.Errorf("default Chromium executable %q is not usable: %w. Install Debian's chromium package there or set %s to a valid Chrome/Chromium executable. Snap-wrapper chromium-browser launchers are unsupported in this container", defaultPath, err, chromeExecutableEnvVar)
+	}
+	return defaultPath, nil
+}
+
+func validateExecutablePath(path string, stat func(string) (fs.FileInfo, error)) error {
+	info, err := stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return errors.New("path does not exist")
+		}
+		return err
+	}
+	if info.IsDir() {
+		return errors.New("path is a directory")
+	}
+	if info.Mode()&0o111 == 0 {
+		return errors.New("path is not executable")
+	}
+	return nil
 }
