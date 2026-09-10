@@ -301,7 +301,7 @@ func discoverChromiumExecutable(lookPath func(string) (string, error), getenv fu
 			return resolved, nil
 		}
 	}
-	return "", fmt.Errorf("no Chromium/Chrome executable found in PATH or standard locations (%s)", strings.Join(candidates, ", "))
+	return "", fmt.Errorf("no Chromium/Chrome executable found in the checked candidates (%s)", strings.Join(candidates, ", "))
 }
 
 func chromiumExecutableCandidates(goos string, getenv func(string) string) []string {
