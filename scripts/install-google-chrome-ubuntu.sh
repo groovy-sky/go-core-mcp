@@ -62,7 +62,7 @@ if ! command -v gpg >/dev/null 2>&1; then
   fail "gpg is required to install the Google Chrome APT signing key"
 fi
 
-curl -fsSL "$key_url" -o "$tmp_key"
+curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors "$key_url" -o "$tmp_key"
 actual_fingerprint="$(gpg --show-keys --with-colons "$tmp_key" | awk -F: '$1 == "fpr" { print $10; exit }')"
 if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
   fail "unexpected Google Linux signing key fingerprint '$actual_fingerprint'"

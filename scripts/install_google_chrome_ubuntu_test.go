@@ -49,6 +49,7 @@ func TestInstallGoogleChromeUbuntuScriptStaticChecks(t *testing.T) {
 		"EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796",
 		"gpg --show-keys --with-colons",
 		"mv \"$tmp_repo\" \"$repo_file\"",
+		"--retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors",
 	}
 	for _, needle := range required {
 		if !strings.Contains(text, needle) {
