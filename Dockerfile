@@ -39,6 +39,12 @@ RUN --mount=type=secret,id=hf_token \
 FROM model-fetch AS chromium-debian
 RUN apt-get update \
     && apt-get install -y --no-install-recommends chromium \
+    && mkdir -p /opt/chromium-debian-libs \
+    && ldd /usr/lib/chromium/chromium \
+      | awk '($3 ~ /^\//) { print $3 }' \
+      | grep -Ev '/(ld-linux-x86-64\.so|libc\.so|libm\.so|libpthread\.so|libgcc_s\.so|libstdc\+\+\.so)(\.|$)' \
+      | sort -u \
+      | xargs -r -I{} sh -c 'mkdir -p "/opt/chromium-debian-libs$(dirname "{}")" && cp -L "{}" "/opt/chromium-debian-libs{}"' \
     && rm -rf /var/lib/apt/lists/*
 
 FROM llama-runtime AS runtime
@@ -72,39 +78,30 @@ COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY --from=chromium-debian /etc/chromium /etc/chromium
 COPY --from=chromium-debian /etc/chromium.d /etc/chromium.d
-COPY --from=chromium-debian /usr/bin/chromium /usr/bin/chromium
+COPY --from=chromium-debian /usr/bin/chromium /usr/local/bin/chromium-debian-real
 COPY --from=chromium-debian /usr/lib/chromium /usr/lib/chromium
 COPY --from=chromium-debian /usr/share/chromium /usr/share/chromium
+COPY --from=chromium-debian /opt/chromium-debian-libs /opt/chromium-debian-libs
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/chat-templates/ /opt/llama/chat-templates/
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        chromium \
         fonts-liberation \
         fonts-noto-color-emoji \
         libgomp1 \
-        libnspr4 \
-        libnss3 \
     && rm -rf /var/lib/apt/lists/* \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        'set -eu' \
+        'export LD_LIBRARY_PATH="/opt/chromium-debian-libs/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu/pulseaudio${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+        'exec /usr/local/bin/chromium-debian-real "$@"' \
+      > /usr/bin/chromium \
+    && chmod +x /usr/bin/chromium \
     && test -x /opt/llama/llama-server \
     && test -x /usr/bin/chromium \
     && chmod +x /usr/local/bin/entrypoint.sh \
     && mkdir -p /output
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libdav1d.so.6 /lib/x86_64-linux-gnu/libdav1d.so.6
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libdav1d.so.6.6.0 /lib/x86_64-linux-gnu/libdav1d.so.6.6.0
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libdouble-conversion.so.3 /lib/x86_64-linux-gnu/libdouble-conversion.so.3
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libdouble-conversion.so.3.1 /lib/x86_64-linux-gnu/libdouble-conversion.so.3.1
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libharfbuzz-subset.so.0 /lib/x86_64-linux-gnu/libharfbuzz-subset.so.0
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libharfbuzz-subset.so.0.60000.0 /lib/x86_64-linux-gnu/libharfbuzz-subset.so.0.60000.0
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libjpeg.so.62 /lib/x86_64-linux-gnu/libjpeg.so.62
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libjpeg.so.62.3.0 /lib/x86_64-linux-gnu/libjpeg.so.62.3.0
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libminizip.so.1 /lib/x86_64-linux-gnu/libminizip.so.1
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libminizip.so.1.0.0 /lib/x86_64-linux-gnu/libminizip.so.1.0.0
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libopenh264.so.7 /lib/x86_64-linux-gnu/libopenh264.so.7
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libopenh264.so.2.3.1 /lib/x86_64-linux-gnu/libopenh264.so.2.3.1
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libXNVCtrl.so.0 /lib/x86_64-linux-gnu/libXNVCtrl.so.0
-COPY --from=chromium-debian /lib/x86_64-linux-gnu/libXNVCtrl.so.0.0.0 /lib/x86_64-linux-gnu/libXNVCtrl.so.0.0.0
 
 VOLUME /output
 EXPOSE 8080 8765
