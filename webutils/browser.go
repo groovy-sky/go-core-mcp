@@ -375,7 +375,7 @@ func wrapBrowserLaunchError(message string, err error, browserOutput string) err
 	if browserOutput == "" {
 		return fmt.Errorf("%s: %w", message, err)
 	}
-	return fmt.Errorf("%s: %w (browser output: %s)", message, err, browserOutput)
+	return fmt.Errorf("%s (browser output: %s): %w", message, browserOutput, err)
 }
 
 func clampString(value string, limit int) (string, bool) {
