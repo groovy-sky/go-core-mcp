@@ -50,8 +50,11 @@ esac
 
 export DEBIAN_FRONTEND=noninteractive
 
+if ! apt-get update; then
+  apt-get install -y --no-install-recommends ca-certificates
+  apt-get update
+fi
 apt-get install -y --no-install-recommends ca-certificates
-apt-get update
 apt-get install -y --no-install-recommends curl gpg
 
 keyring='/usr/share/keyrings/google-linux-signing-keyring.gpg'
@@ -73,7 +76,12 @@ if ! command -v gpg >/dev/null 2>&1; then
 fi
 
 curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors "$key_url" -o "$tmp_key"
-actual_fingerprint="$(gpg --show-keys --with-colons "$tmp_key" | awk -F: '$1 == "pub" { want = 1; next } want && $1 == "fpr" { print $10; exit }')"
+key_info="$(gpg --batch --with-colons --import-options show-only --import "$tmp_key")"
+pub_count="$(printf '%s\n' "$key_info" | awk -F: '$1 == "pub" { count++ } END { print count + 0 }')"
+if [[ "$pub_count" != "1" ]]; then
+  fail "expected exactly one public key in Google's signing key file"
+fi
+actual_fingerprint="$(printf '%s\n' "$key_info" | awk -F: '$1 == "pub" { seen_pub++; next } seen_pub == 1 && $1 == "fpr" { print $10; exit }')"
 if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
   fail "unexpected Google Linux signing key fingerprint '$actual_fingerprint'"
 fi
