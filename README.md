@@ -184,6 +184,31 @@ This builds three binaries from `cmd/`:
 The web browsing integration depends on `chromedp`/CDP Go packages; Chromium
 itself is provided by the runtime environment (or bundled Docker image).
 
+## Local browser prerequisite (Ubuntu/Debian APT, no Snap)
+
+`webutils-mcp` needs a Chrome/Chromium-compatible executable when you run it
+locally outside Docker. On Ubuntu, `chromium-browser` commonly resolves to the
+Snap launcher stub, so it is not the no-Snap installation path for this
+repository.
+
+For Ubuntu/Debian-style APT environments that must avoid Snap, install Google
+Chrome Stable from Google's signed APT repository with the helper in this repo:
+
+```sh
+sudo ./scripts/install-google-chrome-ubuntu.sh
+google-chrome --version
+```
+
+If you are using a build that supports an explicit browser executable override,
+point it at the installed binary:
+
+```sh
+export WEBUTILS_CHROME_EXECUTABLE=/usr/bin/google-chrome
+```
+
+The existing Docker image remains self-contained and continues to install
+Debian's `chromium` package via APT inside the runtime image.
+
 ## Model download (no GGUF committed to git)
 
 ```sh
