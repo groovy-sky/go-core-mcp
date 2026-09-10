@@ -372,6 +372,9 @@ func joinWindowsPath(base, tail string) string {
 }
 
 func probeChromiumExecutable(ctx context.Context, executable string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, chromiumProbeTimeout)
 	defer cancel()
 
