@@ -147,6 +147,27 @@ func TestResolveChromeExecutableRejectsNonExecutableOverride(t *testing.T) {
 	}
 }
 
+func TestResolveChromeExecutableRejectsNonExecutableDefault(t *testing.T) {
+	t.Parallel()
+
+	nonExecutable := filepath.Join(t.TempDir(), "non-executable-default")
+	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write non-executable file: %v", err)
+	}
+
+	_, err := resolveChromeExecutable(
+		func(string) (string, bool) { return "", false },
+		os.Stat,
+		nonExecutable,
+	)
+	if err == nil {
+		t.Fatal("expected error for non-executable default path")
+	}
+	if !strings.Contains(err.Error(), "path is not executable") {
+		t.Fatalf("expected non-executable error, got %q", err)
+	}
+}
+
 func makeExecutable(t *testing.T, name string) string {
 	t.Helper()
 

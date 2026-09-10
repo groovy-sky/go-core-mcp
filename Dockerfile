@@ -93,14 +93,14 @@ RUN apt-get update \
         fonts-liberation \
         fonts-noto-color-emoji \
         libgomp1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && printf '%s\n' \
-        '#!/bin/sh' \
-        'set -eu' \
-        'export LD_LIBRARY_PATH="/usr/lib/chromium:/opt/chromium-debian-libs/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu/pulseaudio${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
-        'exec /usr/local/bin/chromium-debian-real "$@"' \
-      > /usr/bin/chromium \
-    && chmod +x /usr/bin/chromium \
+    && rm -rf /var/lib/apt/lists/*
+RUN cat > /usr/bin/chromium <<'EOF'
+#!/bin/sh
+set -eu
+export LD_LIBRARY_PATH="/usr/lib/chromium:/opt/chromium-debian-libs/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu/pulseaudio${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /usr/local/bin/chromium-debian-real "$@"
+EOF
+RUN chmod +x /usr/bin/chromium \
     && test -x /opt/llama/llama-server \
     && test -x /usr/bin/chromium \
     && chmod +x /usr/local/bin/entrypoint.sh \
