@@ -7,8 +7,12 @@
 #   1. The final image keeps this repo's container entrypoint
 #      (`/usr/local/bin/entrypoint.sh`) as its effective ENTRYPOINT (not the
 #      upstream llama.cpp base image entrypoint), and still contains the
-#      compiled `/usr/local/bin/groovy-agent` and `/usr/local/bin/coreutils-mcp`
-#      binaries.
+#      compiled `/usr/local/bin/groovy-agent`, `/usr/local/bin/coreutils-mcp`,
+#      and `/usr/local/bin/webutils-mcp` binaries.
+#   1a. The runtime image exports
+#      `WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium`, contains that exact
+#      Debian Chromium binary, and can start it headlessly without relying on
+#      an Ubuntu Snap wrapper path such as `chromium-browser`.
 #   2. `docker/entrypoint.sh` starts llama-server, waits for it to become
 #      healthy, and forwards the container command to `groovy-agent`
 #      with the bundled MCP server configured.
@@ -75,8 +79,27 @@ DOCKER_BUILDKIT=1 "$CONTAINER_ENGINE" build \
 
 echo "==> Verifying compiled binaries"
 "$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c \
-  'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp'
-echo "    groovy-agent and coreutils-mcp binaries OK"
+  'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp && test -x /usr/local/bin/webutils-mcp'
+echo "    groovy-agent, coreutils-mcp, and webutils-mcp binaries OK"
+
+echo "==> Verifying bundled Chromium path and headless launch"
+"$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c '
+  test "${WEBUTILS_CHROME_EXECUTABLE:-}" = "/usr/bin/chromium" &&
+  test -x /usr/bin/chromium &&
+  timeout 20 /usr/bin/chromium \
+    --headless \
+    --no-sandbox \
+    --disable-gpu \
+    --disable-dev-shm-usage \
+    --remote-debugging-port=0 \
+    --dump-dom "data:text/html,<html><body>ok</body></html>" >/tmp/chromium-dom.txt 2>/dev/null || status=$? &&
+  case "${status:-0}" in
+    0|124) ;;
+    *) exit "${status}" ;;
+  esac &&
+  grep -q "<body>ok</body>" /tmp/chromium-dom.txt
+'
+echo "    WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium and headless Chromium launch OK"
 
 echo "==> Verifying runtime entrypoint wiring"
 if [[ "$("$CONTAINER_ENGINE" inspect --format '{{json .Config.Entrypoint}}' "$IMAGE_NAME")" != '["/usr/local/bin/entrypoint.sh"]' ]]; then
@@ -96,40 +119,40 @@ echo "    LLAMA_SERVER_HOST defaults to 0.0.0.0"
 mkdir -p "$WORK_DIR/output"
 
 cat > "$WORK_DIR/stub-llama-server" <<'EOF'
-#!/usr/bin/env python3
-"""Deterministic stand-in for llama-server used by the smoke test.
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use IO::Socket::INET;
 
-Records the CLI args it was started with (so the entrypoint's llama-server
-wiring can be asserted) and serves a minimal HTTP server that answers /health
-and /v1/models with HTTP 200 so docker/entrypoint.sh's readiness loop
-succeeds without requiring a real model, GPU, or CPU inference.
-"""
-import http.server
-import os
-import sys
+open my $fp, '>', '/output/llama-argv.txt' or die "open /output/llama-argv.txt: $!";
+print {$fp} join("\n", @ARGV), "\n";
+close $fp;
 
-with open("/output/llama-argv.txt", "w", encoding="utf-8") as fp:
-    fp.write("\n".join(sys.argv[1:]) + "\n")
+my $host = $ENV{LLAMA_SERVER_HOST} // '0.0.0.0';
+my $port = $ENV{LLAMA_SERVER_PORT} // '8080';
 
-host = os.environ.get("LLAMA_SERVER_HOST", "0.0.0.0")
-port = int(os.environ.get("LLAMA_SERVER_PORT", "8080"))
+my $server = IO::Socket::INET->new(
+  LocalAddr => $host,
+  LocalPort => $port,
+  Listen => 5,
+  ReuseAddr => 1,
+  Proto => 'tcp',
+) or die "listen: $!";
 
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/health", "/v1/models"):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"{}")
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, fmt, *args):
-        pass
-
-
-http.server.HTTPServer((host, port), Handler).serve_forever()
+while (my $client = $server->accept()) {
+  my $request = <$client>;
+  next unless defined $request;
+  while (defined(my $line = <$client>)) {
+    last if $line =~ /^\r?\n$/;
+  }
+  my ($path) = $request =~ m{^\S+\s+(\S+)};
+  if (defined $path && ($path eq '/health' || $path eq '/v1/models')) {
+    print {$client} "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+  } else {
+    print {$client} "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+  }
+  close $client;
+}
 EOF
 
 cat > "$WORK_DIR/stub-groovy-agent" <<'EOF'

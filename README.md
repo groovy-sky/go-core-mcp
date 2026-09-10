@@ -199,15 +199,17 @@ sudo ./scripts/install-google-chrome-ubuntu.sh
 google-chrome --version
 ```
 
-If you are using a build that supports an explicit browser executable override,
-point it at the installed binary:
+`webutils-mcp` honors `WEBUTILS_CHROME_EXECUTABLE` when set, so point it at the
+installed binary:
 
 ```sh
 export WEBUTILS_CHROME_EXECUTABLE=/usr/bin/google-chrome
 ```
 
-The existing Docker image remains self-contained and continues to install
-Debian's `chromium` package via APT inside the runtime image.
+When `WEBUTILS_CHROME_EXECUTABLE` is unset, the bundled container runtime uses
+`/usr/bin/chromium` deterministically. Snap-wrapper paths such as
+`chromium-browser` are unsupported for this containerized server because they
+require Snap infrastructure that is not present in the minimal runtime image.
 
 ## Model download (no GGUF committed to git)
 
@@ -260,7 +262,9 @@ official `llama.cpp` server image, and wires everything together with
 `docker/entrypoint.sh`, which starts `llama-server`, waits for it to
 become healthy, then runs `groovy-agent` with the bundled MCP server
 configured. The runtime image also installs Chromium, CA certificates, and
-fonts required by `webutils-mcp` when browsing is opted in.
+fonts required by `webutils-mcp` when browsing is opted in, and exports
+`WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium` to match the packaged Debian
+browser binary.
 
 When using the published image from GHCR, the Phi-4 workflow now pushes:
 
@@ -523,7 +527,11 @@ without downloading a model or running real LLM inference:
 This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
 
 - the compiled `/usr/local/bin/groovy-agent` and
-  `/usr/local/bin/coreutils-mcp` binaries are present;
+  `/usr/local/bin/coreutils-mcp` and `/usr/local/bin/webutils-mcp` binaries are
+  present;
+- the runtime image exports `WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium`,
+  contains `/usr/bin/chromium`, and can launch it headlessly without relying on
+  a Snap-wrapper `chromium-browser` path;
 - `docker/entrypoint.sh` starts llama-server, waits for it to become
   ready, and forwards the container command to `groovy-agent` with the
   bundled MCP server configured;
@@ -597,6 +605,12 @@ single closed-schema tool:
   - `url` (required, HTTPS only)
   - `max_text_chars` (optional, bounded)
 - `capture_screenshot` is intentionally not part of this MVP schema.
+- `WEBUTILS_CHROME_EXECUTABLE` (default unset outside Docker): optional absolute
+  Chrome/Chromium executable override. When unset in the bundled container
+  image, `webutils-mcp` uses `/usr/bin/chromium`. If the configured path is
+  missing or not executable, startup fails with an actionable error instead of
+  falling back to PATH discovery. Snap-wrapper `chromium-browser` launchers are
+  unsupported for this containerized server.
 
 Container/`docker/entrypoint.sh` environment variables:
 
