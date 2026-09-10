@@ -43,15 +43,12 @@ func TestDiscoverChromiumExecutableUsesChromedpSearchOrder(t *testing.T) {
 }
 
 func TestValidateChromiumExecutableRejectsMissingConfiguredPath(t *testing.T) {
-	_, err := validateChromiumExecutable(context.Background(), "/missing/chrome", func(candidate string) (string, error) {
+	_, _, err := resolveChromiumExecutable("/missing/chrome", func(candidate string) (string, error) {
 		if candidate != "/missing/chrome" {
 			t.Fatalf("unexpected executable lookup: %q", candidate)
 		}
 		return "", exec.ErrNotFound
-	}, nil, func(context.Context, string) error {
-		t.Fatal("probe should not run when lookup fails")
-		return nil
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error for missing configured executable")
 	}
@@ -64,12 +61,9 @@ func TestValidateChromiumExecutableRejectsMissingConfiguredPath(t *testing.T) {
 }
 
 func TestValidateChromiumExecutableRejectsMissingAutoDiscoveredBrowser(t *testing.T) {
-	_, err := validateChromiumExecutable(context.Background(), "", func(string) (string, error) {
+	_, _, err := resolveChromiumExecutable("", func(string) (string, error) {
 		return "", exec.ErrNotFound
-	}, nil, func(context.Context, string) error {
-		t.Fatal("probe should not run when discovery fails")
-		return nil
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected error when no browser can be discovered")
 	}
@@ -80,7 +74,7 @@ func TestValidateChromiumExecutableRejectsMissingAutoDiscoveredBrowser(t *testin
 
 func TestValidateChromiumExecutableRejectsBrokenAutoDiscoveredBrowser(t *testing.T) {
 	probeErr := errors.New("snap launcher is present but chromium snap is not installed")
-	_, err := validateChromiumExecutable(context.Background(), "", func(candidate string) (string, error) {
+	_, err := resolveAndValidateChromiumExecutable(context.Background(), "", func(candidate string) (string, error) {
 		if candidate == "chromium" {
 			return "/snap/bin/chromium", nil
 		}
@@ -103,7 +97,7 @@ func TestValidateChromiumExecutableRejectsBrokenAutoDiscoveredBrowser(t *testing
 }
 
 func TestValidateChromiumExecutableReturnsResolvedPath(t *testing.T) {
-	got, err := validateChromiumExecutable(context.Background(), "", func(candidate string) (string, error) {
+	got, err := resolveAndValidateChromiumExecutable(context.Background(), "", func(candidate string) (string, error) {
 		if candidate == "chromium" {
 			return "/usr/bin/chromium", nil
 		}

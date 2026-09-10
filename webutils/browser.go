@@ -109,7 +109,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	defer cancel()
 
 	configuredExecutable := configuredChromiumExecutable(b.getenv)
-	resolvedExecutable, err := validateChromiumExecutable(runCtx, configuredExecutable, b.lookPath, b.getenv, b.probeExecutable)
+	resolvedExecutable, err := resolveAndValidateChromiumExecutable(runCtx, configuredExecutable, b.lookPath, b.getenv, b.probeExecutable)
 	if err != nil {
 		return BrowseResult{}, err
 	}
@@ -264,31 +264,46 @@ func execAllocatorOptions(profileDir, executable string, output io.Writer) []chr
 	return options
 }
 
-func validateChromiumExecutable(ctx context.Context, configured string, lookPath func(string) (string, error), getenv func(string) string, probe func(context.Context, string) error) (string, error) {
-	if lookPath == nil {
-		return "", errors.New("browser executable lookup is not configured")
+func resolveAndValidateChromiumExecutable(ctx context.Context, configured string, lookPath func(string) (string, error), getenv func(string) string, probe func(context.Context, string) error) (string, error) {
+	resolved, explicit, err := resolveChromiumExecutable(configured, lookPath, getenv)
+	if err != nil {
+		return "", err
 	}
-	if probe == nil {
-		return "", errors.New("browser preflight probe is not configured")
+	if err := validateChromiumExecutable(ctx, configured, resolved, explicit, probe); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func resolveChromiumExecutable(configured string, lookPath func(string) (string, error), getenv func(string) string) (string, bool, error) {
+	if lookPath == nil {
+		return "", false, errors.New("browser executable lookup is not configured")
 	}
 	if configured != "" {
 		resolved, err := lookPath(configured)
 		if err != nil {
-			return "", fmt.Errorf("%s is set to %q, but that executable could not be found. Set %s to a working Chromium/Chrome executable path such as /usr/bin/chromium: %w", chromeExecutableEnvVar, configured, chromeExecutableEnvVar, err)
+			return "", true, fmt.Errorf("%s is set to %q, but that executable could not be found. Set %s to a working Chromium/Chrome executable path such as /usr/bin/chromium: %w", chromeExecutableEnvVar, configured, chromeExecutableEnvVar, err)
 		}
-		if err := probe(ctx, resolved); err != nil {
-			return "", fmt.Errorf("%s is set to %q, but Chromium/Chrome could not be started from %q. Fix that executable or point %s to a working browser path: %w", chromeExecutableEnvVar, configured, resolved, chromeExecutableEnvVar, err)
-		}
-		return resolved, nil
+		return resolved, true, nil
 	}
 	resolved, err := discoverChromiumExecutable(lookPath, getenv)
 	if err != nil {
-		return "", fmt.Errorf("Chromium or Chrome is required for browse_url. Install it and make sure it is available on PATH, or configure %s to a working executable path: %w", chromeExecutableEnvVar, err)
+		return "", false, fmt.Errorf("Chromium or Chrome is required for browse_url. Install it and make sure it is available on PATH, or configure %s to a working executable path: %w", chromeExecutableEnvVar, err)
+	}
+	return resolved, false, nil
+}
+
+func validateChromiumExecutable(ctx context.Context, configured, resolved string, explicit bool, probe func(context.Context, string) error) error {
+	if probe == nil {
+		return errors.New("browser preflight probe is not configured")
 	}
 	if err := probe(ctx, resolved); err != nil {
-		return "", fmt.Errorf("Chromium or Chrome was discovered at %q, but it could not be started. Ensure a working browser is installed and available on PATH, or configure %s to a working executable path: %w", resolved, chromeExecutableEnvVar, err)
+		if explicit {
+			return fmt.Errorf("%s is set to %q, but Chromium/Chrome could not be started from %q. Fix that executable or point %s to a working browser path: %w", chromeExecutableEnvVar, configured, resolved, chromeExecutableEnvVar, err)
+		}
+		return fmt.Errorf("Chromium or Chrome was discovered at %q, but it could not be started. Ensure a working browser is installed and available on PATH, or configure %s to a working executable path: %w", resolved, chromeExecutableEnvVar, err)
 	}
-	return resolved, nil
+	return nil
 }
 
 func discoverChromiumExecutable(lookPath func(string) (string, error), getenv func(string) string) (string, error) {
