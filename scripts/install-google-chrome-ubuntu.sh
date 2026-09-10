@@ -50,8 +50,9 @@ esac
 
 export DEBIAN_FRONTEND=noninteractive
 
+apt-get install -y --no-install-recommends ca-certificates
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gpg
+apt-get install -y --no-install-recommends curl gpg
 
 keyring='/usr/share/keyrings/google-linux-signing-keyring.gpg'
 repo_file='/etc/apt/sources.list.d/google-chrome.list'
@@ -72,7 +73,7 @@ if ! command -v gpg >/dev/null 2>&1; then
 fi
 
 curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors "$key_url" -o "$tmp_key"
-actual_fingerprint="$(gpg --show-keys --with-colons "$tmp_key" | awk -F: '$1 == "fpr" { print $10; exit }')"
+actual_fingerprint="$(gpg --show-keys --with-colons "$tmp_key" | awk -F: '$1 == "pub" { want = 1; next } want && $1 == "fpr" { print $10; exit }')"
 if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
   fail "unexpected Google Linux signing key fingerprint '$actual_fingerprint'"
 fi
