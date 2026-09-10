@@ -182,8 +182,8 @@ This builds three binaries from `cmd/`:
 - `cmd/webutils-mcp` → the optional Chromium browsing MCP server
 
 The web browsing integration depends on `chromedp`/CDP Go packages. The Docker
-runtime image already bundles Debian `chromium`; for direct/local binary use,
-install a Chromium- or Chrome-compatible executable first.
+runtime image already bundles a Chromium/Chrome-compatible browser for
+`webutils-mcp`; for direct/local binary use, install one first.
 
 ## Model download (no GGUF committed to git)
 

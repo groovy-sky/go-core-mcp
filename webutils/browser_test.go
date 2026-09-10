@@ -10,8 +10,6 @@ import (
 )
 
 func TestConfiguredChromiumExecutableTrimsWhitespace(t *testing.T) {
-	t.Setenv(chromeExecutableEnvVar, "  /usr/bin/chromium  \n")
-
 	got := configuredChromiumExecutable(func(key string) string {
 		if key != chromeExecutableEnvVar {
 			t.Fatalf("unexpected env lookup: %q", key)
@@ -62,6 +60,21 @@ func TestValidateChromiumExecutableRejectsMissingConfiguredPath(t *testing.T) {
 	}
 	if !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("expected wrapped exec.ErrNotFound, got %v", err)
+	}
+}
+
+func TestValidateChromiumExecutableRejectsMissingAutoDiscoveredBrowser(t *testing.T) {
+	err := validateChromiumExecutable(context.Background(), "", func(string) (string, error) {
+		return "", exec.ErrNotFound
+	}, func(context.Context, string) error {
+		t.Fatal("probe should not run when discovery fails")
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error when no browser can be discovered")
+	}
+	if !strings.Contains(err.Error(), "available on PATH") || !strings.Contains(err.Error(), chromeExecutableEnvVar) {
+		t.Fatalf("expected actionable discovery guidance, got %q", err)
 	}
 }
 
