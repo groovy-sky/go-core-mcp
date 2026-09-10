@@ -42,19 +42,35 @@ esac
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg
+apt-get install -y --no-install-recommends ca-certificates curl gpg
 
 keyring='/usr/share/keyrings/google-linux-signing-keyring.gpg'
 repo_file='/etc/apt/sources.list.d/google-chrome.list'
 key_url='https://dl.google.com/linux/linux_signing_key.pub'
 repo_url='https://dl.google.com/linux/chrome/deb/'
+expected_fingerprint='EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796'
 
 install -d -m 0755 /usr/share/keyrings
 tmp_key="$(mktemp)"
-trap 'rm -f "$tmp_key"' EXIT
+tmp_repo="$(mktemp "${repo_file}.tmp.XXXXXX")"
+cleanup() {
+  rm -f "$tmp_key" "$tmp_repo"
+}
+trap cleanup EXIT
+
+if ! command -v gpg >/dev/null 2>&1; then
+  fail "gpg is required to install the Google Chrome APT signing key"
+fi
+
 curl -fsSL "$key_url" -o "$tmp_key"
+actual_fingerprint="$(gpg --show-keys --with-colons "$tmp_key" | awk -F: '$1 == "fpr" { print $10; exit }')"
+if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
+  fail "unexpected Google Linux signing key fingerprint '$actual_fingerprint'"
+fi
 gpg --dearmor --yes --output "$keyring" "$tmp_key"
-printf 'deb [arch=amd64 signed-by=%s] %s stable main\n' "$keyring" "$repo_url" > "$repo_file"
+printf 'deb [arch=amd64 signed-by=%s] %s stable main\n' "$keyring" "$repo_url" > "$tmp_repo"
+chmod 0644 "$tmp_repo"
+mv "$tmp_repo" "$repo_file"
 
 apt-get update
 apt-get install -y --no-install-recommends google-chrome-stable

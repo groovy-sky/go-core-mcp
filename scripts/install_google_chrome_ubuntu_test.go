@@ -46,6 +46,9 @@ func TestInstallGoogleChromeUbuntuScriptStaticChecks(t *testing.T) {
 		"signed-by=",
 		"linux_signing_key.pub",
 		"DEBIAN_FRONTEND=noninteractive",
+		"EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796",
+		"gpg --show-keys --with-colons",
+		"mv \"$tmp_repo\" \"$repo_file\"",
 	}
 	for _, needle := range required {
 		if !strings.Contains(text, needle) {
