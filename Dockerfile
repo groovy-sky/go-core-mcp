@@ -97,7 +97,8 @@ RUN apt-get update \
         fonts-noto-color-emoji \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
-RUN find /opt/chromium-debian-libs -type f -name '*.so*' -printf '%h\n' \
+RUN mkdir -p /opt/chromium-debian-libs \
+    && find /opt/chromium-debian-libs -type f -name '*.so*' -printf '%h\n' \
       | sort -u \
       | paste -sd: - \
       > /opt/chromium-debian-lib-path
