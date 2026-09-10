@@ -81,7 +81,7 @@ COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY --from=chromium-debian /opt/chromium-debian-config/etc/chromium /etc/chromium
 COPY --from=chromium-debian /opt/chromium-debian-config/etc/chromium.d /etc/chromium.d
-COPY --from=chromium-debian /usr/bin/chromium /usr/local/bin/chromium-debian-launcher
+COPY --from=chromium-debian /usr/bin/chromium /usr/bin/chromium
 COPY --from=chromium-debian /usr/lib/chromium /usr/lib/chromium
 COPY --from=chromium-debian /usr/share/chromium /usr/share/chromium
 COPY --from=chromium-debian /opt/chromium-debian-libs /opt/chromium-debian-libs
@@ -98,7 +98,8 @@ RUN find /opt/chromium-debian-libs -type f -name '*.so*' -printf '%h\n' \
       | sort -u \
       | paste -sd: - \
       > /opt/chromium-debian-lib-path
-RUN cat > /usr/bin/chromium <<'EOF'
+RUN mv /usr/lib/chromium/chromium /usr/lib/chromium/chromium.real
+RUN cat > /usr/lib/chromium/chromium <<'EOF'
 #!/bin/sh
 set -eu
 lib_dirs="$(cat /opt/chromium-debian-lib-path)"
@@ -107,9 +108,9 @@ if [ -n "$lib_dirs" ]; then
 else
   export LD_LIBRARY_PATH="/usr/lib/chromium${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
-exec /usr/local/bin/chromium-debian-launcher "$@"
+exec /usr/lib/chromium/chromium.real "$@"
 EOF
-RUN chmod +x /usr/bin/chromium /usr/local/bin/chromium-debian-launcher \
+RUN chmod +x /usr/bin/chromium /usr/lib/chromium/chromium \
     && test -x /opt/llama/llama-server \
     && test -x /usr/bin/chromium \
     && chmod +x /usr/local/bin/entrypoint.sh \
