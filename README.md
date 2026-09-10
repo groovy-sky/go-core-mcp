@@ -181,8 +181,9 @@ This builds three binaries from `cmd/`:
 - `cmd/coreutils-mcp` → the standalone coreutils MCP server
 - `cmd/webutils-mcp` → the optional Chromium browsing MCP server
 
-The web browsing integration depends on `chromedp`/CDP Go packages; Chromium
-itself is provided by the runtime environment (or bundled Docker image).
+The web browsing integration depends on `chromedp`/CDP Go packages. The Docker
+runtime image already bundles a Chromium/Chrome-compatible browser for
+`webutils-mcp`; for direct/local binary use, install one first.
 
 ## Model download (no GGUF committed to git)
 
@@ -226,6 +227,21 @@ files are ignored by git (see `.gitignore`).
 
 4. Optional: enable browsing for public HTTPS pages by explicitly adding
    `--web-mcp-command ./bin/webutils-mcp`.
+
+   `webutils-mcp` requires a working Chromium/Chrome executable. If it is not
+   on `PATH`, or a system launcher such as Ubuntu's `chromium` wrapper is
+   broken, point it at a real browser binary explicitly:
+
+   ```sh
+   WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium \
+   ./bin/groovy-agent \
+     --llama-url http://127.0.0.1:8080 \
+     --model Phi-4-mini-instruct \
+     --mcp-command ./bin/coreutils-mcp \
+     --web-mcp-command ./bin/webutils-mcp \
+     --workspace . \
+     "Browse https://example.com/ and summarize it."
+   ```
 
 ## Running the Docker image (llama.cpp + agent bundled)
 
@@ -572,6 +588,18 @@ single closed-schema tool:
   - `url` (required, HTTPS only)
   - `max_text_chars` (optional, bounded)
 - `capture_screenshot` is intentionally not part of this MVP schema.
+- Browsing remains opt-in and public-HTTPS only.
+- `WEBUTILS_CHROME_EXECUTABLE` (default unset): optional Chromium/Chrome
+  executable override. Whitespace is trimmed before use. Example:
+
+  ```sh
+  WEBUTILS_CHROME_EXECUTABLE=/usr/bin/google-chrome ./bin/webutils-mcp
+  ```
+
+  This is useful when the browser is not on `PATH` or a system launcher is
+  present but unusable. When unset, `webutils-mcp` searches common
+  Chromium/Chrome executable candidates, validates the resolved browser up
+  front, and then launches that same executable for the browse request.
 
 Container/`docker/entrypoint.sh` environment variables:
 

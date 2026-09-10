@@ -7,8 +7,8 @@
 #   1. The final image keeps this repo's container entrypoint
 #      (`/usr/local/bin/entrypoint.sh`) as its effective ENTRYPOINT (not the
 #      upstream llama.cpp base image entrypoint), and still contains the
-#      compiled `/usr/local/bin/groovy-agent` and `/usr/local/bin/coreutils-mcp`
-#      binaries.
+#      compiled `/usr/local/bin/groovy-agent`, `/usr/local/bin/coreutils-mcp`,
+#      and `/usr/local/bin/webutils-mcp` binaries plus a Chromium executable.
 #   2. `docker/entrypoint.sh` starts llama-server, waits for it to become
 #      healthy, and forwards the container command to `groovy-agent`
 #      with the bundled MCP server configured.
@@ -73,10 +73,10 @@ DOCKER_BUILDKIT=1 "$CONTAINER_ENGINE" build \
   -t "$IMAGE_NAME" \
   "$ROOT_DIR"
 
-echo "==> Verifying compiled binaries"
+echo "==> Verifying compiled binaries and Chromium runtime"
 "$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c \
-  'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp'
-echo "    groovy-agent and coreutils-mcp binaries OK"
+  'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp && test -x /usr/local/bin/webutils-mcp && (command -v chromium >/dev/null || command -v chromium-browser >/dev/null || command -v google-chrome >/dev/null)'
+echo "    groovy-agent, coreutils-mcp, webutils-mcp, and a Chromium/Chrome executable are present"
 
 echo "==> Verifying runtime entrypoint wiring"
 if [[ "$("$CONTAINER_ENGINE" inspect --format '{{json .Config.Entrypoint}}' "$IMAGE_NAME")" != '["/usr/local/bin/entrypoint.sh"]' ]]; then
