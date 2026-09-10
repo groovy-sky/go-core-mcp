@@ -9,10 +9,10 @@
 #      upstream llama.cpp base image entrypoint), and still contains the
 #      compiled `/usr/local/bin/groovy-agent`, `/usr/local/bin/coreutils-mcp`,
 #      and `/usr/local/bin/webutils-mcp` binaries.
-#   1a. The runtime image exports
-#      `WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium`, contains that exact
-#      Debian Chromium binary, and can start it headlessly without relying on
-#      an Ubuntu Snap wrapper path such as `chromium-browser`.
+#   1a. The runtime image exports a concrete Chrome/Chromium-compatible
+#      executable plus default root-safe browser flags for `webutils-mcp`, and
+#      can start that browser headlessly without relying on an Ubuntu Snap
+#      wrapper path such as `chromium-browser`.
 #   2. `docker/entrypoint.sh` starts llama-server, waits for it to become
 #      healthy, and forwards the container command to `groovy-agent`
 #      with the bundled MCP server configured.
@@ -82,15 +82,15 @@ echo "==> Verifying compiled binaries"
   'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp && test -x /usr/local/bin/webutils-mcp'
 echo "    groovy-agent, coreutils-mcp, and webutils-mcp binaries OK"
 
-echo "==> Verifying bundled Chromium path and headless launch"
+echo "==> Verifying bundled browser path, default flags, and headless launch"
 "$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c '
   test "${WEBUTILS_CHROME_EXECUTABLE:-}" = "/usr/bin/chromium" &&
+  test "${WEBUTILS_CHROME_ARGS:-}" = "--no-sandbox --disable-dev-shm-usage" &&
   test -x /usr/bin/chromium &&
   timeout 20 /usr/bin/chromium \
     --headless \
-    --no-sandbox \
+    $WEBUTILS_CHROME_ARGS \
     --disable-gpu \
-    --disable-dev-shm-usage \
     --remote-debugging-port=0 \
     --dump-dom "data:text/html,<html><body>ok</body></html>" >/tmp/chromium-dom.txt 2>/dev/null || status=$? &&
   case "${status:-0}" in
@@ -99,7 +99,7 @@ echo "==> Verifying bundled Chromium path and headless launch"
   esac &&
   grep -q "<body>ok</body>" /tmp/chromium-dom.txt
 '
-echo "    WEBUTILS_CHROME_EXECUTABLE=/usr/bin/chromium and headless Chromium launch OK"
+echo "    bundled browser executable, default root-safe flags, and headless launch OK"
 
 echo "==> Verifying runtime entrypoint wiring"
 if [[ "$("$CONTAINER_ENGINE" inspect --format '{{json .Config.Entrypoint}}' "$IMAGE_NAME")" != '["/usr/local/bin/entrypoint.sh"]' ]]; then

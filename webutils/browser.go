@@ -22,6 +22,7 @@ const (
 	defaultMaxLinks         = 40
 	defaultMaxLinkTextChars = 200
 	chromeExecutableEnvVar  = "WEBUTILS_CHROME_EXECUTABLE"
+	chromeArgsEnvVar        = "WEBUTILS_CHROME_ARGS"
 	defaultChromeExecutable = "/usr/bin/chromium"
 )
 
@@ -92,6 +93,10 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	if err != nil {
 		return BrowseResult{}, err
 	}
+	execOptions, err := resolveChromeArgs()
+	if err != nil {
+		return BrowseResult{}, err
+	}
 
 	profileDir, err := os.MkdirTemp("", "webutils-chromium-*")
 	if err != nil {
@@ -114,6 +119,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.NoFirstRun,
 	)
+	allocatorOptions = append(allocatorOptions, execOptions...)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(runCtx, allocatorOptions...)
 	defer allocCancel()
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
@@ -241,6 +247,58 @@ func clampString(value string, limit int) (string, bool) {
 
 func resolveChromeExecutablePath() (string, error) {
 	return resolveChromeExecutable(os.LookupEnv, os.Stat, defaultChromeExecutable)
+}
+
+func resolveChromeArgs() ([]chromedp.ExecAllocatorOption, error) {
+	return resolveChromeArgsFromEnv(os.LookupEnv)
+}
+
+func resolveChromeArgsFromEnv(lookupEnv func(string) (string, bool)) ([]chromedp.ExecAllocatorOption, error) {
+	configured, ok := lookupEnv(chromeArgsEnvVar)
+	if !ok {
+		return nil, nil
+	}
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return nil, nil
+	}
+
+	flags, err := parseChromeArgs(configured)
+	if err != nil {
+		return nil, err
+	}
+	options := make([]chromedp.ExecAllocatorOption, 0, len(flags))
+	for _, flag := range flags {
+		if flag.hasValue {
+			options = append(options, chromedp.Flag(flag.name, flag.value))
+			continue
+		}
+		options = append(options, chromedp.Flag(flag.name, true))
+	}
+	return options, nil
+}
+
+type chromeFlag struct {
+	name     string
+	value    string
+	hasValue bool
+}
+
+func parseChromeArgs(configured string) ([]chromeFlag, error) {
+	args := strings.Fields(configured)
+	flags := make([]chromeFlag, 0, len(args))
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") {
+			return nil, fmt.Errorf("%s contains unsupported Chromium argument %q: expected --flag or --flag=value syntax", chromeArgsEnvVar, arg)
+		}
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("%s contains an empty Chromium flag in %q", chromeArgsEnvVar, arg)
+		}
+		flags = append(flags, chromeFlag{name: name, value: value, hasValue: hasValue})
+	}
+	return flags, nil
 }
 
 func resolveChromeExecutable(lookupEnv func(string) (string, bool), stat func(string) (fs.FileInfo, error), defaultPath string) (string, error) {

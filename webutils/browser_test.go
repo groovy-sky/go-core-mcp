@@ -147,6 +147,82 @@ func TestResolveChromeExecutableRejectsNonExecutableOverride(t *testing.T) {
 	}
 }
 
+func TestResolveChromeArgsUsesConfiguredFlags(t *testing.T) {
+	t.Parallel()
+
+	flags, err := parseChromeArgs("--no-sandbox --disable-dev-shm-usage --proxy-server=https://example.com:443")
+	if err != nil {
+		t.Fatalf("parseChromeArgs returned error: %v", err)
+	}
+	if len(flags) != 3 {
+		t.Fatalf("expected 3 flags, got %d", len(flags))
+	}
+
+	if got := flags[0]; got != (chromeFlag{name: "no-sandbox"}) {
+		t.Fatalf("unexpected first flag: %#v", got)
+	}
+	if got := flags[1]; got != (chromeFlag{name: "disable-dev-shm-usage"}) {
+		t.Fatalf("unexpected second flag: %#v", got)
+	}
+	if got := flags[2]; got != (chromeFlag{name: "proxy-server", value: "https://example.com:443", hasValue: true}) {
+		t.Fatalf("unexpected third flag: %#v", got)
+	}
+}
+
+func TestResolveChromeArgsTreatsUnsetAndBlankAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		lookupEnv func(string) (string, bool)
+	}{
+		{
+			name: "unset",
+			lookupEnv: func(string) (string, bool) { return "", false },
+		},
+		{
+			name: "blank",
+			lookupEnv: func(key string) (string, bool) {
+				if key != chromeArgsEnvVar {
+					return "", false
+				}
+				return " \t ", true
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			options, err := resolveChromeArgsFromEnv(tc.lookupEnv)
+			if err != nil {
+				t.Fatalf("resolveChromeArgsFromEnv returned error: %v", err)
+			}
+			if len(options) != 0 {
+				t.Fatalf("expected no options, got %d", len(options))
+			}
+		})
+	}
+}
+
+func TestResolveChromeArgsRejectsUnsupportedSyntax(t *testing.T) {
+	t.Parallel()
+
+	_, err := resolveChromeArgsFromEnv(func(key string) (string, bool) {
+		if key != chromeArgsEnvVar {
+			return "", false
+		}
+		return "no-sandbox", true
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported Chromium argument syntax")
+	}
+	if !strings.Contains(err.Error(), chromeArgsEnvVar) {
+		t.Fatalf("expected error to mention %s, got %q", chromeArgsEnvVar, err)
+	}
+}
+
 func makeExecutable(t *testing.T, name string) string {
 	t.Helper()
 
