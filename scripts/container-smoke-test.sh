@@ -94,7 +94,13 @@ echo "==> Verifying bundled Chromium path and headless launch"
     --remote-debugging-port=0 \
     --dump-dom "data:text/html,<html><body>ok</body></html>" >/tmp/chromium-dom.txt 2>/dev/null || status=$? &&
   case "${status:-0}" in
-    0|124) ;;
+    0) ;;
+    124)
+      if ! grep -q "<body>ok</body>" /tmp/chromium-dom.txt 2>/dev/null; then
+        echo "Chromium timed out before rendering the expected DOM" >&2
+        exit 124
+      fi
+      ;;
     *) exit "${status}" ;;
   esac &&
   grep -q "<body>ok</body>" /tmp/chromium-dom.txt
