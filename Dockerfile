@@ -43,6 +43,9 @@ RUN apt-get update \
     && if [ -d /etc/chromium ]; then cp -a /etc/chromium/. /opt/chromium-debian-config/etc/chromium/; fi \
     && if [ -d /etc/chromium.d ]; then cp -a /etc/chromium.d/. /opt/chromium-debian-config/etc/chromium.d/; fi \
     && mkdir -p /opt/chromium-debian-libs \
+    # Exclude the base runtime's core ABI libraries so Chromium uses Ubuntu's
+    # libc/libstdc++ family while still picking up Debian-only secondary
+    # dependencies from the staged tree below.
     && ldd /usr/lib/chromium/chromium \
       | awk '($3 ~ /^\//) { print $3 }' \
       | grep -Ev '/(ld-linux-x86-64\.so|libc\.so|libm\.so|libpthread\.so|libgcc_s\.so|libstdc\+\+\.so)(\.|$)' \
@@ -98,20 +101,15 @@ RUN find /opt/chromium-debian-libs -type f -name '*.so*' -printf '%h\n' \
       | sort -u \
       | paste -sd: - \
       > /opt/chromium-debian-lib-path
-RUN mv /usr/lib/chromium/chromium /usr/lib/chromium/chromium.real
-RUN cat > /usr/lib/chromium/chromium <<'EOF'
-#!/bin/sh
-set -eu
+RUN cat > /etc/chromium.d/99-groovy-agent-staged-libs <<'EOF'
 lib_dirs="$(cat /opt/chromium-debian-lib-path)"
 if [ -n "$lib_dirs" ]; then
   export LD_LIBRARY_PATH="/usr/lib/chromium:$lib_dirs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
   export LD_LIBRARY_PATH="/usr/lib/chromium${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
-exec /usr/lib/chromium/chromium.real "$@"
 EOF
-RUN chmod +x /usr/bin/chromium /usr/lib/chromium/chromium \
-    && test -x /opt/llama/llama-server \
+RUN test -x /opt/llama/llama-server \
     && test -x /usr/bin/chromium \
     && chmod +x /usr/local/bin/entrypoint.sh \
     && mkdir -p /output
