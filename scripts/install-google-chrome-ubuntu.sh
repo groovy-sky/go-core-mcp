@@ -17,7 +17,16 @@ fi
 . /etc/os-release
 os_id="${ID:-}"
 os_like="${ID_LIKE:-}"
-if [[ "$os_id" != "ubuntu" && "$os_id" != "debian" && "$os_like" != *debian* && "$os_like" != *ubuntu* ]]; then
+is_debian_like=0
+for token in $os_like; do
+  case "$token" in
+    debian|ubuntu)
+      is_debian_like=1
+      break
+      ;;
+  esac
+done
+if [[ "$os_id" != "ubuntu" && "$os_id" != "debian" && "$is_debian_like" != "1" ]]; then
   fail "unsupported operating system '${PRETTY_NAME:-unknown}'; expected Ubuntu/Debian-style APT"
 fi
 
