@@ -39,7 +39,7 @@ RUN --mount=type=secret,id=hf_token \
 FROM debian:bookworm-slim AS chromium-debian
 RUN set -eu; \
     apt-get update; \
-    apt-get install -y --no-install-recommends chromium; \
+    apt-get install -y --no-install-recommends chromium chromium-sandbox; \
     mkdir -p /chromium-rootfs /chromium-rootfs/opt/chromium-libs; \
     copy_package_files() { \
       pkg="$1"; \
@@ -59,7 +59,7 @@ RUN set -eu; \
         fi; \
       done; \
     }; \
-    payload_packages='chromium chromium-common'; \
+    payload_packages='chromium chromium-common chromium-sandbox'; \
     dependency_packages="$( \
       apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances chromium chromium-common \
         | sed -n 's/^[| ]*PreDepends: //p; s/^[| ]*Depends: //p' \
@@ -83,7 +83,12 @@ FROM llama-runtime AS runtime
 # Snap stub with copied browser fragments or a second package install strategy.
 ARG MODEL_FILENAME="Phi-4-mini-instruct.Q8_0.gguf"
 ARG MODEL_NAME="Phi-4-mini-instruct"
+ARG AGENT_UID=10001
+ARG AGENT_GID=10001
 
+# Keep Debian's chromium-sandbox payload in the image, but default to
+# --no-sandbox because the repository's container runtime still blocks
+# Chromium's sandbox namespace setup for this non-root user.
 ENV LLAMA_SERVER_HOST=0.0.0.0 \
     LLAMA_SERVER_PORT=8080 \
     LLAMA_MODEL_FILE=${MODEL_FILENAME} \
@@ -93,6 +98,11 @@ ENV LLAMA_SERVER_HOST=0.0.0.0 \
     LLAMA_N_GPU_LAYERS=0 \
     LLAMA_STARTUP_TIMEOUT=180 \
     LD_LIBRARY_PATH=/opt/llama \
+    HOME=/home/groovy-agent \
+    XDG_CONFIG_HOME=/home/groovy-agent/.config \
+    XDG_CACHE_HOME=/home/groovy-agent/.cache \
+    XDG_DATA_HOME=/home/groovy-agent/.local/share \
+    XDG_RUNTIME_DIR=/home/groovy-agent/.local/run \
     AGENT_OUTPUT_DIR=/output \
     MCP_HTTP_HOST=0.0.0.0 \
     MCP_HTTP_PORT=8765 \
@@ -122,11 +132,20 @@ COPY docker/chromium-wrapper.sh /usr/bin/chromium
 RUN test -x /opt/llama/llama-server \
     && chmod +x /usr/bin/chromium \
     && test -x /usr/bin/chromium \
+    && test -u /usr/lib/chromium/chrome-sandbox \
     && /usr/bin/chromium --version >/dev/null \
     && chmod +x /usr/local/bin/entrypoint.sh \
-    && mkdir -p /output
+    && groupadd --gid "${AGENT_GID}" groovy-agent \
+    && useradd --uid "${AGENT_UID}" --gid "${AGENT_GID}" --create-home --home-dir "${HOME}" --shell /usr/sbin/nologin groovy-agent \
+    && install -d -o groovy-agent -g groovy-agent -m 0755 /output \
+    && install -d -o groovy-agent -g groovy-agent -m 0700 \
+        "${XDG_CONFIG_HOME}" \
+        "${XDG_CACHE_HOME}" \
+        "${XDG_DATA_HOME}" \
+        "${XDG_RUNTIME_DIR}"
 
 VOLUME /output
 EXPOSE 8080 8765
+USER ${AGENT_UID}:${AGENT_GID}
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []

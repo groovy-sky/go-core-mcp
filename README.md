@@ -265,9 +265,14 @@ become healthy, then runs `groovy-agent` with the bundled MCP server
 configured. The runtime image also bundles Debian's Chromium payload and its
 runtime dependency closure, adds a stable `/usr/bin/chromium` wrapper for
 `webutils-mcp`, installs the CA certificates/fonts the browser needs, and
-exports `WEBUTILS_CHROME_ARGS="--no-sandbox --disable-dev-shm-usage"` so
-headless browsing works from the root-running container without depending on
-Ubuntu's Snap `chromium-browser` wrapper.
+defaults to running as uid/gid `10001:10001` (`groovy-agent`) with owned
+HOME/XDG runtime directories plus `/output`. The image also keeps Debian's
+`chromium-sandbox` payload bundled, but still defaults
+`WEBUTILS_CHROME_ARGS` to `--no-sandbox --disable-dev-shm-usage`: in the
+repository's default Docker runtime, Chromium's namespace sandbox remains
+blocked (`Operation not permitted`) even for this non-root user, so dropping
+`--no-sandbox` would break browsing out of the box. The image still does not
+depend on Ubuntu's Snap `chromium-browser` wrapper.
 
 When using the published image from GHCR, the Phi-4 workflow now pushes:
 
@@ -441,6 +446,12 @@ docker run --rm \
   --workspace /output "summarize the first lines of README.md"
 ```
 
+The container runs as uid/gid `10001:10001` by default. Docker named volumes
+work out of the box because the image pre-creates `/output` with that
+ownership. For bind mounts, make the host directory writable to uid `10001`
+(for example by matching ownership or granting write permission) before
+starting the container.
+
 ### Run the remote MCP server (no llama-server)
 
 Pass `mcp` as the container command to serve the bundled read-only
@@ -532,9 +543,15 @@ This builds the `runtime` target with `DOWNLOAD_MODEL=0`, then checks:
 - the compiled `/usr/local/bin/groovy-agent` and
   `/usr/local/bin/coreutils-mcp` and `/usr/local/bin/webutils-mcp` binaries are
   present;
-- the runtime image exports a concrete browser executable and default
-  root-safe browser flags for `webutils-mcp`, and can launch that browser
-  headlessly without relying on a Snap-wrapper `chromium-browser` path;
+- the runtime image defaults to uid/gid `10001:10001`, pre-creates writable
+  HOME/XDG/output paths for that user, and keeps `/output` writable;
+- the runtime image exports a concrete browser executable, keeps Debian's
+  `chromium-sandbox` helper in the copied payload, and can launch that browser
+  headlessly with the default container-compatible flags under the default
+  non-root user;
+- a deterministic in-container HTTPS fixture can be loaded through the bundled
+  Chromium wrapper under the default container user, so the Chromium-backed
+  browsing path works without contacting an external site;
 - `docker/entrypoint.sh` starts llama-server, waits for it to become
   ready, and forwards the container command to `groovy-agent` with the
   bundled MCP server configured;
@@ -618,8 +635,12 @@ single closed-schema tool:
 - `WEBUTILS_CHROME_ARGS` (default unset outside Docker): optional
   whitespace-separated `--flag` / `--flag=value` Chromium arguments appended to
   the `chromedp` launcher configuration. The bundled container image sets
-  `--no-sandbox --disable-dev-shm-usage` so the browser can run reliably as
-  root inside the container.
+  `--no-sandbox --disable-dev-shm-usage`. The image still bundles Debian's
+  `chromium-sandbox` helper, but the repository's default Docker runtime blocks
+  Chromium's sandbox namespace transitions even for the non-root container user,
+  so `--no-sandbox` remains the compatibility default. If your runtime permits a
+  usable Chromium sandbox, you can override this variable to drop
+  `--no-sandbox`.
 
 Container/`docker/entrypoint.sh` environment variables:
 

@@ -9,8 +9,43 @@ set -euo pipefail
 # usage.
 exec 3<&0
 
+ensure_writable_dir() {
+  local dir_path="$1"
+  local label="$2"
+  if ! mkdir -p "$dir_path"; then
+    echo "failed to create ${label}: ${dir_path}" >&2
+    exit 1
+  fi
+  if [[ ! -d "$dir_path" ]]; then
+    echo "${label} is not a directory: ${dir_path}" >&2
+    exit 1
+  fi
+  if [[ ! -w "$dir_path" || ! -x "$dir_path" ]]; then
+    echo "${label} is not writable by uid $(id -u):gid $(id -g): ${dir_path}" >&2
+    if [[ "$dir_path" == "${AGENT_OUTPUT_DIR:-/output}" ]]; then
+      echo "grant write access to the bind-mounted /output path or use a Docker named volume" >&2
+    fi
+    exit 1
+  fi
+}
+
+export HOME="${HOME:-/home/groovy-agent}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-${HOME}/.local/run}"
+
+ensure_writable_dir "$HOME" "HOME directory"
+ensure_writable_dir "$XDG_CONFIG_HOME" "XDG config directory"
+ensure_writable_dir "$XDG_CACHE_HOME" "XDG cache directory"
+ensure_writable_dir "$XDG_DATA_HOME" "XDG data directory"
+ensure_writable_dir "$XDG_RUNTIME_DIR" "XDG runtime directory"
+if [[ -O "$XDG_RUNTIME_DIR" ]]; then
+  chmod 700 "$XDG_RUNTIME_DIR"
+fi
+
 # Ensure the output directory exists so result JSON files can always be written.
-mkdir -p "${AGENT_OUTPUT_DIR:-/output}"
+ensure_writable_dir "${AGENT_OUTPUT_DIR:-/output}" "agent output directory"
 
 # Waits for a backgrounded process to exit and sets $wait_status to its exit
 # code, retrying `wait` after a trapped signal forwarded to that process
@@ -44,7 +79,7 @@ if [[ "${1:-}" == "mcp" ]]; then
   MCP_HTTP_PATH="${MCP_HTTP_PATH:-/mcp}"
   MCP_HTTP_TOKEN="${MCP_HTTP_TOKEN:-}"
   MCP_WORKSPACE="${MCP_WORKSPACE:-${AGENT_OUTPUT_DIR:-/output}}"
-  mkdir -p "$MCP_WORKSPACE"
+  ensure_writable_dir "$MCP_WORKSPACE" "MCP workspace"
 
   mcp_args=(
     --workspace "$MCP_WORKSPACE"
@@ -310,7 +345,7 @@ if [[ "$LLAMA_MCP_COREUTILS" != "0" || "$LLAMA_MCP_WEBUTILS" != "0" ]]; then
     echo "LLAMA_MCP_WORKSPACE must not contain control characters" >&2
     exit 1
   fi
-  mkdir -p "$LLAMA_MCP_WORKSPACE"
+  ensure_writable_dir "$LLAMA_MCP_WORKSPACE" "llama MCP workspace"
   if [[ "$LLAMA_MCP_COREUTILS" != "0" ]]; then
     mcp_servers_entries+=("$(printf '"coreutils":{"command":"/usr/local/bin/coreutils-mcp","args":["--workspace","%s","--transport","stdio"]}' "$(json_escape "$LLAMA_MCP_WORKSPACE")")")
     echo "registering bundled coreutils MCP server with llama-server (stdio)" >&2
