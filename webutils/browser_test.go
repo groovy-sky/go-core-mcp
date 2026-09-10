@@ -43,7 +43,7 @@ func TestDiscoverChromiumExecutableUsesChromedpSearchOrder(t *testing.T) {
 }
 
 func TestValidateChromiumExecutableRejectsMissingConfiguredPath(t *testing.T) {
-	err := validateChromiumExecutable(context.Background(), "/missing/chrome", func(candidate string) (string, error) {
+	_, err := validateChromiumExecutable(context.Background(), "/missing/chrome", func(candidate string) (string, error) {
 		if candidate != "/missing/chrome" {
 			t.Fatalf("unexpected executable lookup: %q", candidate)
 		}
@@ -64,7 +64,7 @@ func TestValidateChromiumExecutableRejectsMissingConfiguredPath(t *testing.T) {
 }
 
 func TestValidateChromiumExecutableRejectsMissingAutoDiscoveredBrowser(t *testing.T) {
-	err := validateChromiumExecutable(context.Background(), "", func(string) (string, error) {
+	_, err := validateChromiumExecutable(context.Background(), "", func(string) (string, error) {
 		return "", exec.ErrNotFound
 	}, nil, func(context.Context, string) error {
 		t.Fatal("probe should not run when discovery fails")
@@ -80,7 +80,7 @@ func TestValidateChromiumExecutableRejectsMissingAutoDiscoveredBrowser(t *testin
 
 func TestValidateChromiumExecutableRejectsBrokenAutoDiscoveredBrowser(t *testing.T) {
 	probeErr := errors.New("snap launcher is present but chromium snap is not installed")
-	err := validateChromiumExecutable(context.Background(), "", func(candidate string) (string, error) {
+	_, err := validateChromiumExecutable(context.Background(), "", func(candidate string) (string, error) {
 		if candidate == "chromium" {
 			return "/snap/bin/chromium", nil
 		}
@@ -99,6 +99,26 @@ func TestValidateChromiumExecutableRejectsBrokenAutoDiscoveredBrowser(t *testing
 	}
 	if !errors.Is(err, probeErr) {
 		t.Fatalf("expected wrapped probe error, got %v", err)
+	}
+}
+
+func TestValidateChromiumExecutableReturnsResolvedPath(t *testing.T) {
+	got, err := validateChromiumExecutable(context.Background(), "", func(candidate string) (string, error) {
+		if candidate == "chromium" {
+			return "/usr/bin/chromium", nil
+		}
+		return "", exec.ErrNotFound
+	}, nil, func(_ context.Context, executable string) error {
+		if executable != "/usr/bin/chromium" {
+			t.Fatalf("unexpected executable probe: %q", executable)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected successful validation, got %v", err)
+	}
+	if got != "/usr/bin/chromium" {
+		t.Fatalf("expected resolved executable path, got %q", got)
 	}
 }
 

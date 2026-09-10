@@ -109,7 +109,8 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	defer cancel()
 
 	configuredExecutable := configuredChromiumExecutable(b.getenv)
-	if err := validateChromiumExecutable(runCtx, configuredExecutable, b.lookPath, b.getenv, b.probeExecutable); err != nil {
+	resolvedExecutable, err := validateChromiumExecutable(runCtx, configuredExecutable, b.lookPath, b.getenv, b.probeExecutable)
+	if err != nil {
 		return BrowseResult{}, err
 	}
 
@@ -120,7 +121,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	defer os.RemoveAll(profileDir)
 
 	var browserOutput bytes.Buffer
-	allocatorOptions := execAllocatorOptions(profileDir, configuredExecutable, &browserOutput)
+	allocatorOptions := execAllocatorOptions(profileDir, resolvedExecutable, &browserOutput)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(runCtx, allocatorOptions...)
 	defer allocCancel()
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
@@ -263,31 +264,31 @@ func execAllocatorOptions(profileDir, executable string, output io.Writer) []chr
 	return options
 }
 
-func validateChromiumExecutable(ctx context.Context, configured string, lookPath func(string) (string, error), getenv func(string) string, probe func(context.Context, string) error) error {
+func validateChromiumExecutable(ctx context.Context, configured string, lookPath func(string) (string, error), getenv func(string) string, probe func(context.Context, string) error) (string, error) {
 	if lookPath == nil {
-		return errors.New("browser executable lookup is not configured")
+		return "", errors.New("browser executable lookup is not configured")
 	}
 	if probe == nil {
-		return errors.New("browser preflight probe is not configured")
+		return "", errors.New("browser preflight probe is not configured")
 	}
 	if configured != "" {
 		resolved, err := lookPath(configured)
 		if err != nil {
-			return fmt.Errorf("%s is set to %q, but that executable could not be found. Set %s to a working Chromium/Chrome executable path such as /usr/bin/chromium: %w", chromeExecutableEnvVar, configured, chromeExecutableEnvVar, err)
+			return "", fmt.Errorf("%s is set to %q, but that executable could not be found. Set %s to a working Chromium/Chrome executable path such as /usr/bin/chromium: %w", chromeExecutableEnvVar, configured, chromeExecutableEnvVar, err)
 		}
 		if err := probe(ctx, resolved); err != nil {
-			return fmt.Errorf("%s is set to %q, but Chromium/Chrome could not be started from %q. Fix that executable or point %s to a working browser path: %w", chromeExecutableEnvVar, configured, resolved, chromeExecutableEnvVar, err)
+			return "", fmt.Errorf("%s is set to %q, but Chromium/Chrome could not be started from %q. Fix that executable or point %s to a working browser path: %w", chromeExecutableEnvVar, configured, resolved, chromeExecutableEnvVar, err)
 		}
-		return nil
+		return resolved, nil
 	}
 	resolved, err := discoverChromiumExecutable(lookPath, getenv)
 	if err != nil {
-		return fmt.Errorf("Chromium or Chrome is required for browse_url. Install it and make sure it is available on PATH, or configure %s to a working executable path: %w", chromeExecutableEnvVar, err)
+		return "", fmt.Errorf("Chromium or Chrome is required for browse_url. Install it and make sure it is available on PATH, or configure %s to a working executable path: %w", chromeExecutableEnvVar, err)
 	}
 	if err := probe(ctx, resolved); err != nil {
-		return fmt.Errorf("Chromium or Chrome was discovered at %q, but it could not be started. Ensure a working browser is installed and available on PATH, or configure %s to a working executable path: %w", resolved, chromeExecutableEnvVar, err)
+		return "", fmt.Errorf("Chromium or Chrome was discovered at %q, but it could not be started. Ensure a working browser is installed and available on PATH, or configure %s to a working executable path: %w", resolved, chromeExecutableEnvVar, err)
 	}
-	return nil
+	return resolved, nil
 }
 
 func discoverChromiumExecutable(lookPath func(string) (string, error), getenv func(string) string) (string, error) {
