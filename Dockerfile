@@ -48,7 +48,7 @@ RUN apt-get update \
     # dependencies from the staged tree below.
     && ldd /usr/lib/chromium/chromium \
       | awk '($3 ~ /^\//) { print $3 }' \
-      | grep -Ev '/(ld-linux-x86-64\.so|libc\.so|libm\.so|libpthread\.so|libgcc_s\.so|libstdc\+\+\.so)(\.|$)' \
+    | grep -Ev '/(ld-linux-x86-64\.so|libc\.so|libdl\.so|libgcc_s\.so|libm\.so|libpthread\.so|libresolv\.so|librt\.so|libstdc\+\+\.so)(\.|$)' \
       | sort -u \
       | xargs -r -I{} sh -c 'mkdir -p "/opt/chromium-debian-libs$(dirname "{}")" && cp -L "{}" "/opt/chromium-debian-libs{}"' \
     && rm -rf /var/lib/apt/lists/*
@@ -102,7 +102,7 @@ RUN find /opt/chromium-debian-libs -type f -name '*.so*' -printf '%h\n' \
       | paste -sd: - \
       > /opt/chromium-debian-lib-path
 RUN lib_dirs="$(cat /opt/chromium-debian-lib-path)" \
-    && printf 'export LD_LIBRARY_PATH="/usr/lib/chromium%s:$LD_LIBRARY_PATH"\n' "${lib_dirs:+:$lib_dirs}" \
+    && printf 'export LD_LIBRARY_PATH="/usr/lib/chromium:$LD_LIBRARY_PATH%s"\n' "${lib_dirs:+:$lib_dirs}" \
       > /etc/chromium.d/99-groovy-agent-staged-libs
 RUN test -x /opt/llama/llama-server \
     && test -x /usr/bin/chromium \
