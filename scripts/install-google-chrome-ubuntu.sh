@@ -51,11 +51,9 @@ esac
 export DEBIAN_FRONTEND=noninteractive
 
 if ! apt-get update; then
-  apt-get install -y --no-install-recommends ca-certificates
-  apt-get update
+  fail "apt-get update failed; fix the base APT configuration before running this helper"
 fi
-apt-get install -y --no-install-recommends ca-certificates
-apt-get install -y --no-install-recommends curl gpg
+apt-get install -y --no-install-recommends ca-certificates curl gpg
 
 keyring='/usr/share/keyrings/google-linux-signing-keyring.gpg'
 repo_file='/etc/apt/sources.list.d/google-chrome.list'
