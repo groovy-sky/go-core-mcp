@@ -42,6 +42,7 @@ func TestInstallGoogleChromeUbuntuScriptStaticChecks(t *testing.T) {
 	required := []string{
 		"/usr/bin/google-chrome",
 		"dpkg --print-architecture",
+		"amd64",
 		"google-chrome-stable",
 		"signed-by=",
 		"linux_signing_key.pub",

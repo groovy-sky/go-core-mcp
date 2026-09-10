@@ -53,7 +53,9 @@ export DEBIAN_FRONTEND=noninteractive
 if ! apt-get update; then
   fail "apt-get update failed; fix the base APT configuration before running this helper"
 fi
-apt-get install -y --no-install-recommends ca-certificates curl gpg
+if ! apt-get install -y --no-install-recommends ca-certificates curl gpg; then
+  fail "failed to install required APT prerequisites (ca-certificates, curl, gpg)"
+fi
 
 keyring='/usr/share/keyrings/google-linux-signing-keyring.gpg'
 repo_file='/etc/apt/sources.list.d/google-chrome.list'
@@ -88,8 +90,12 @@ printf 'deb [arch=amd64 signed-by=%s] %s stable main\n' "$keyring" "$repo_url" >
 chmod 0644 "$tmp_repo"
 mv "$tmp_repo" "$repo_file"
 
-apt-get update
-apt-get install -y --no-install-recommends google-chrome-stable
+if ! apt-get update; then
+  fail "apt-get update failed after configuring the Google Chrome APT repository"
+fi
+if ! apt-get install -y --no-install-recommends google-chrome-stable; then
+  fail "failed to install google-chrome-stable from the Google APT repository"
+fi
 
 if [[ ! -x /usr/bin/google-chrome ]]; then
   fail "installation completed but /usr/bin/google-chrome was not found"
