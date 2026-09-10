@@ -20,7 +20,11 @@ func installScriptPath(t *testing.T) string {
 
 func TestInstallGoogleChromeUbuntuScriptSyntax(t *testing.T) {
 	scriptPath := installScriptPath(t)
-	cmd := exec.Command("bash", "-n", scriptPath)
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+	cmd := exec.Command(bashPath, "-n", scriptPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash -n %s failed: %v\n%s", scriptPath, err, output)
