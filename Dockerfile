@@ -39,6 +39,9 @@ RUN --mount=type=secret,id=hf_token \
 FROM model-fetch AS chromium-debian
 RUN apt-get update \
     && apt-get install -y --no-install-recommends chromium \
+    && mkdir -p /opt/chromium-debian-config/etc/chromium /opt/chromium-debian-config/etc/chromium.d \
+    && if [ -d /etc/chromium ]; then cp -a /etc/chromium/. /opt/chromium-debian-config/etc/chromium/; fi \
+    && if [ -d /etc/chromium.d ]; then cp -a /etc/chromium.d/. /opt/chromium-debian-config/etc/chromium.d/; fi \
     && mkdir -p /opt/chromium-debian-libs \
     && ldd /usr/lib/chromium/chromium \
       | awk '($3 ~ /^\//) { print $3 }' \
@@ -76,8 +79,8 @@ COPY --from=go-builder /out/coreutils-mcp /usr/local/bin/coreutils-mcp
 COPY --from=go-builder /out/webutils-mcp /usr/local/bin/webutils-mcp
 COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
-COPY --from=chromium-debian /etc/chromium /etc/chromium
-COPY --from=chromium-debian /etc/chromium.d /etc/chromium.d
+COPY --from=chromium-debian /opt/chromium-debian-config/etc/chromium /etc/chromium
+COPY --from=chromium-debian /opt/chromium-debian-config/etc/chromium.d /etc/chromium.d
 COPY --from=chromium-debian /usr/bin/chromium /usr/local/bin/chromium-debian-real
 COPY --from=chromium-debian /usr/lib/chromium /usr/lib/chromium
 COPY --from=chromium-debian /usr/share/chromium /usr/share/chromium
@@ -94,7 +97,7 @@ RUN apt-get update \
     && printf '%s\n' \
         '#!/bin/sh' \
         'set -eu' \
-        'export LD_LIBRARY_PATH="/opt/chromium-debian-libs/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu/pulseaudio${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+        'export LD_LIBRARY_PATH="/usr/lib/chromium:/opt/chromium-debian-libs/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu:/opt/chromium-debian-libs/usr/lib/x86_64-linux-gnu/pulseaudio${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
         'exec /usr/local/bin/chromium-debian-real "$@"' \
       > /usr/bin/chromium \
     && chmod +x /usr/bin/chromium \
