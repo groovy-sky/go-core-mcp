@@ -102,7 +102,7 @@ RUN find /opt/chromium-debian-libs -type f -name '*.so*' -printf '%h\n' \
       | paste -sd: - \
       > /opt/chromium-debian-lib-path
 RUN lib_dirs="$(cat /opt/chromium-debian-lib-path)" \
-    && printf 'export LD_LIBRARY_PATH="/usr/lib/chromium:$LD_LIBRARY_PATH%s"\n' "${lib_dirs:+:$lib_dirs}" \
+    && printf 'export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib/chromium%s"\n' "${lib_dirs:+:$lib_dirs}" \
       > /etc/chromium.d/99-groovy-agent-staged-libs
 RUN test -x /opt/llama/llama-server \
     && test -x /usr/bin/chromium \
