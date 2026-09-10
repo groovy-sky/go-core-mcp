@@ -81,7 +81,7 @@ COPY --from=llama-runtime /app /opt/llama
 COPY --from=model-fetch /models/ /models/
 COPY --from=chromium-debian /opt/chromium-debian-config/etc/chromium /etc/chromium
 COPY --from=chromium-debian /opt/chromium-debian-config/etc/chromium.d /etc/chromium.d
-COPY --from=chromium-debian /usr/bin/chromium /usr/bin/chromium
+COPY --from=chromium-debian /usr/bin/chromium /usr/local/bin/chromium-debian-launcher
 COPY --from=chromium-debian /usr/lib/chromium /usr/lib/chromium
 COPY --from=chromium-debian /usr/share/chromium /usr/share/chromium
 COPY --from=chromium-debian /opt/chromium-debian-libs /opt/chromium-debian-libs
@@ -94,8 +94,22 @@ RUN apt-get update \
         fonts-noto-color-emoji \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
-RUN perl -0pi -e 's/CHROMIUM_FLAGS=""/CHROMIUM_FLAGS=""\nexport LD_LIBRARY_PATH="\/usr\/lib\/chromium:\/opt\/chromium-debian-libs\/lib\/x86_64-linux-gnu:\/opt\/chromium-debian-libs\/usr\/lib\/x86_64-linux-gnu:\/opt\/chromium-debian-libs\/usr\/lib\/x86_64-linux-gnu\/pulseaudio\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"/' /usr/bin/chromium \
-    && chmod +x /usr/bin/chromium \
+RUN cat > /usr/bin/chromium <<'EOF'
+#!/bin/sh
+set -eu
+lib_dirs="$(
+  find /opt/chromium-debian-libs -type f -name '*.so*' -printf '%h\n' \
+    | sort -u \
+    | paste -sd: -
+)"
+if [ -n "$lib_dirs" ]; then
+  export LD_LIBRARY_PATH="/usr/lib/chromium:$lib_dirs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+  export LD_LIBRARY_PATH="/usr/lib/chromium${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+exec /usr/local/bin/chromium-debian-launcher "$@"
+EOF
+RUN chmod +x /usr/bin/chromium /usr/local/bin/chromium-debian-launcher \
     && test -x /opt/llama/llama-server \
     && test -x /usr/bin/chromium \
     && chmod +x /usr/local/bin/entrypoint.sh \
