@@ -1,10 +1,15 @@
 package webutils
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +25,8 @@ const (
 	maxAllowedTextChars     = 12000
 	defaultMaxLinks         = 40
 	defaultMaxLinkTextChars = 200
+	chromiumProbeTimeout    = 5 * time.Second
+	chromeExecutableEnvVar  = "WEBUTILS_CHROME_EXECUTABLE"
 )
 
 type Limits struct {
@@ -65,12 +72,21 @@ type Browser interface {
 }
 
 type ChromiumBrowser struct {
-	limits   Limits
-	resolver policyResolver
+	limits          Limits
+	resolver        policyResolver
+	getenv          func(string) string
+	lookPath        func(string) (string, error)
+	probeExecutable func(context.Context, string) error
 }
 
 func NewChromiumBrowser(limits Limits) *ChromiumBrowser {
-	return &ChromiumBrowser{limits: limits, resolver: defaultResolver()}
+	return &ChromiumBrowser{
+		limits:          limits,
+		resolver:        defaultResolver(),
+		getenv:          os.Getenv,
+		lookPath:        exec.LookPath,
+		probeExecutable: probeChromiumExecutable,
+	}
 }
 
 func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (BrowseResult, error) {
@@ -86,12 +102,6 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		return BrowseResult{}, err
 	}
 
-	profileDir, err := os.MkdirTemp("", "webutils-chromium-*")
-	if err != nil {
-		return BrowseResult{}, fmt.Errorf("create browser profile: %w", err)
-	}
-	defer os.RemoveAll(profileDir)
-
 	timeout := b.limits.Timeout
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -99,13 +109,19 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	allocatorOptions := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.UserDataDir(profileDir),
-		chromedp.Headless,
-		chromedp.DisableGPU,
-		chromedp.NoDefaultBrowserCheck,
-		chromedp.NoFirstRun,
-	)
+	configuredExecutable := configuredChromiumExecutable(b.getenv)
+	if err := validateChromiumExecutable(runCtx, configuredExecutable, b.lookPath, b.probeExecutable); err != nil {
+		return BrowseResult{}, err
+	}
+
+	profileDir, err := os.MkdirTemp("", "webutils-chromium-*")
+	if err != nil {
+		return BrowseResult{}, fmt.Errorf("create browser profile: %w", err)
+	}
+	defer os.RemoveAll(profileDir)
+
+	var browserOutput bytes.Buffer
+	allocatorOptions := execAllocatorOptions(profileDir, configuredExecutable, &browserOutput)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(runCtx, allocatorOptions...)
 	defer allocCancel()
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
@@ -165,7 +181,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		network.Enable(),
 		fetch.Enable().WithPatterns([]*fetch.RequestPattern{{URLPattern: "*", RequestStage: fetch.RequestStageRequest}}),
 	); err != nil {
-		return BrowseResult{}, fmt.Errorf("enable browser interception: %w", err)
+		return BrowseResult{}, wrapBrowserLaunchError("enable browser interception", err, browserOutput.String())
 	}
 
 	var (
@@ -187,7 +203,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(browserCtx.Err(), context.DeadlineExceeded) {
 			return BrowseResult{}, context.DeadlineExceeded
 		}
-		return BrowseResult{}, fmt.Errorf("navigation failed: %w", err)
+		return BrowseResult{}, wrapBrowserLaunchError("navigation failed", err, browserOutput.String())
 	}
 	if blocked := getCheckErr(); blocked != nil {
 		return BrowseResult{}, blocked
@@ -222,6 +238,124 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		Links:       links,
 		Truncated:   truncated,
 	}, nil
+}
+
+func configuredChromiumExecutable(getenv func(string) string) string {
+	if getenv == nil {
+		return ""
+	}
+	return strings.TrimSpace(getenv(chromeExecutableEnvVar))
+}
+
+func execAllocatorOptions(profileDir, executable string, output io.Writer) []chromedp.ExecAllocatorOption {
+	options := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.UserDataDir(profileDir),
+		chromedp.Headless,
+		chromedp.DisableGPU,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.NoFirstRun,
+	)
+	if executable != "" {
+		options = append(options, chromedp.ExecPath(executable))
+	}
+	if output != nil {
+		options = append(options, chromedp.CombinedOutput(output))
+	}
+	return options
+}
+
+func validateChromiumExecutable(ctx context.Context, configured string, lookPath func(string) (string, error), probe func(context.Context, string) error) error {
+	if probe == nil {
+		return errors.New("browser preflight probe is not configured")
+	}
+	if configured != "" {
+		resolved, err := lookPath(configured)
+		if err != nil {
+			return fmt.Errorf("%s is set to %q, but that executable could not be found. Set %s to a working Chromium/Chrome executable path such as /usr/bin/chromium: %w", chromeExecutableEnvVar, configured, chromeExecutableEnvVar, err)
+		}
+		if err := probe(ctx, resolved); err != nil {
+			return fmt.Errorf("%s is set to %q, but Chromium/Chrome could not be started from %q. Fix that executable or point %s to a working browser path: %w", chromeExecutableEnvVar, configured, resolved, chromeExecutableEnvVar, err)
+		}
+		return nil
+	}
+	resolved, err := discoverChromiumExecutable(lookPath)
+	if err != nil {
+		return fmt.Errorf("Chromium or Chrome is required for browse_url. Install it and make sure it is available on PATH, or configure %s to a working executable path: %w", chromeExecutableEnvVar, err)
+	}
+	if err := probe(ctx, resolved); err != nil {
+		return fmt.Errorf("Chromium or Chrome was discovered at %q, but it could not be started. Ensure a working browser is installed and available on PATH, or configure %s to a working executable path: %w", resolved, chromeExecutableEnvVar, err)
+	}
+	return nil
+}
+
+func discoverChromiumExecutable(lookPath func(string) (string, error)) (string, error) {
+	if lookPath == nil {
+		return "", errors.New("executable lookup is not configured")
+	}
+	for _, candidate := range chromiumExecutableCandidates() {
+		resolved, err := lookPath(candidate)
+		if err == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("no Chromium/Chrome executable found in PATH or standard locations (%s)", strings.Join(chromiumExecutableCandidates(), ", "))
+}
+
+func chromiumExecutableCandidates() []string {
+	switch runtime.GOOS {
+	case "darwin":
+		return []string{
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		}
+	case "windows":
+		userProfile := os.Getenv("USERPROFILE")
+		return []string{
+			"chrome",
+			"chrome.exe",
+			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			filepath.Join(userProfile, `AppData\Local\Google\Chrome\Application\chrome.exe`),
+			filepath.Join(userProfile, `AppData\Local\Chromium\Application\chrome.exe`),
+		}
+	default:
+		return []string{
+			"headless_shell",
+			"headless-shell",
+			"chromium",
+			"chromium-browser",
+			"google-chrome",
+			"google-chrome-stable",
+			"google-chrome-beta",
+			"google-chrome-unstable",
+			"/usr/bin/google-chrome",
+			"/usr/local/bin/chrome",
+			"/snap/bin/chromium",
+			"chrome",
+		}
+	}
+}
+
+func probeChromiumExecutable(ctx context.Context, executable string) error {
+	probeCtx, cancel := context.WithTimeout(ctx, chromiumProbeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(probeCtx, executable, "--version")
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Run(); err != nil {
+		return wrapBrowserLaunchError("browser preflight failed", err, output.String())
+	}
+	return nil
+}
+
+func wrapBrowserLaunchError(message string, err error, browserOutput string) error {
+	browserOutput = strings.TrimSpace(browserOutput)
+	if browserOutput == "" {
+		return fmt.Errorf("%s: %w", message, err)
+	}
+	return fmt.Errorf("%s: %w (browser output: %s)", message, err, browserOutput)
 }
 
 func clampString(value string, limit int) (string, bool) {
