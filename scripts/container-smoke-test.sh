@@ -9,10 +9,11 @@
 #      upstream llama.cpp base image entrypoint), and still contains the
 #      compiled `/usr/local/bin/groovy-agent`, `/usr/local/bin/coreutils-mcp`,
 #      and `/usr/local/bin/webutils-mcp` binaries.
-#   1a. The runtime image exports a concrete Chrome/Chromium-compatible
-#      executable plus default root-safe browser flags for `webutils-mcp`, and
-#      can start that browser headlessly without relying on an Ubuntu Snap
-#      wrapper path such as `chromium-browser`.
+#   1a. The runtime image defaults to a dedicated non-root user with writable
+#      output/XDG directories, exports a concrete Chrome/Chromium-compatible
+#      executable plus default container-compatible browser flags for
+#      `webutils-mcp`, and can start that browser headlessly without relying on
+#      an Ubuntu Snap wrapper path such as `chromium-browser`.
 #   2. `docker/entrypoint.sh` starts llama-server, waits for it to become
 #      healthy, and forwards the container command to `groovy-agent`
 #      with the bundled MCP server configured.
@@ -56,6 +57,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-groovy-agent:smoke-test}"
 CONTAINER_ENGINE="${CONTAINER_ENGINE:-docker}"
+EXPECTED_UID="${EXPECTED_UID:-10001}"
+EXPECTED_GID="${EXPECTED_GID:-10001}"
 
 WORK_DIR="$(mktemp -d)"
 cleanup() {
@@ -82,11 +85,33 @@ echo "==> Verifying compiled binaries"
   'test -x /usr/local/bin/groovy-agent && test -x /usr/local/bin/coreutils-mcp && test -x /usr/local/bin/webutils-mcp'
 echo "    groovy-agent, coreutils-mcp, and webutils-mcp binaries OK"
 
-echo "==> Verifying bundled browser path, default flags, and headless launch"
+echo "==> Verifying default non-root runtime user and writable paths"
+if [[ "$("$CONTAINER_ENGINE" inspect --format '{{.Config.User}}' "$IMAGE_NAME")" != "${EXPECTED_UID}:${EXPECTED_GID}" ]]; then
+  echo "FAIL: expected image default user ${EXPECTED_UID}:${EXPECTED_GID}" >&2
+  exit 1
+fi
+"$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c "
+  test \"\$(id -u)\" = \"$EXPECTED_UID\" &&
+  test \"\$(id -g)\" = \"$EXPECTED_GID\" &&
+  test \"\$HOME\" = \"/home/groovy-agent\" &&
+  test -w \"\$HOME\" &&
+  test -w \"\$XDG_CONFIG_HOME\" &&
+  test -w \"\$XDG_CACHE_HOME\" &&
+  test -w \"\$XDG_DATA_HOME\" &&
+  test -w \"\$XDG_RUNTIME_DIR\" &&
+  test -w /output &&
+  touch /output/non-root-smoke &&
+  touch \"\$XDG_CACHE_HOME\"/non-root-smoke &&
+  touch \"\$XDG_RUNTIME_DIR\"/non-root-smoke
+"
+echo "    image defaults to uid:gid ${EXPECTED_UID}:${EXPECTED_GID} with writable HOME/XDG/output paths"
+
+echo "==> Verifying bundled browser path, default flags, sandbox payload, and headless launch"
 "$CONTAINER_ENGINE" run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c '
   test "${WEBUTILS_CHROME_EXECUTABLE:-}" = "/usr/bin/chromium" &&
   test "${WEBUTILS_CHROME_ARGS:-}" = "--no-sandbox --disable-dev-shm-usage" &&
   test -x /usr/bin/chromium &&
+  test -u /usr/lib/chromium/chrome-sandbox &&
   timeout 20 /usr/bin/chromium \
     --headless \
     $WEBUTILS_CHROME_ARGS \
@@ -99,7 +124,7 @@ echo "==> Verifying bundled browser path, default flags, and headless launch"
   esac &&
   grep -q "<body>ok</body>" /tmp/chromium-dom.txt
 '
-echo "    bundled browser executable, default root-safe flags, and headless launch OK"
+echo "    bundled browser executable, sandbox payload, default flags, and headless launch OK"
 
 echo "==> Verifying runtime entrypoint wiring"
 if [[ "$("$CONTAINER_ENGINE" inspect --format '{{json .Config.Entrypoint}}' "$IMAGE_NAME")" != '["/usr/local/bin/entrypoint.sh"]' ]]; then
@@ -117,6 +142,86 @@ fi
 echo "    LLAMA_SERVER_HOST defaults to 0.0.0.0"
 
 mkdir -p "$WORK_DIR/output"
+chmod 0777 "$WORK_DIR/output"
+
+cat > "$WORK_DIR/https-fixture.go" <<'EOF'
+package main
+
+import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"log"
+	"math/big"
+	"net"
+	"net/http"
+	"time"
+)
+
+func main() {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		log.Fatalf("generate key: %v", err)
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 62)
+	serialNumber, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		log.Fatalf("serial: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "fixture.example",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		DNSNames:              []string{"fixture.example"},
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, privateKey.Public(), privateKey)
+	if err != nil {
+		log.Fatalf("create certificate: %v", err)
+	}
+	certificate := tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  privateKey,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Fixture OK</title><link rel="icon" href="data:,"></head><body><main>non-root chromium fixture page</main><a href="https://fixture.example:9443/next">next</a></body></html>`))
+	})
+	mux.HandleFunc("/next", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Fixture Next</title><link rel="icon" href="data:,"></head><body>next page</body></html>`))
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:9443")
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	log.Printf("fixture listening on https://127.0.0.1:9443")
+	tlsListener := tls.NewListener(listener, &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		MinVersion:   tls.VersionTLS12,
+	})
+	log.Fatal(http.Serve(tlsListener, mux))
+}
+EOF
+GOFLAGS='' CGO_ENABLED=0 go build -o "$WORK_DIR/https-fixture" "$WORK_DIR/https-fixture.go"
+
+cat > "$WORK_DIR/chromium-test-wrapper" <<'EOF'
+#!/usr/bin/env sh
+exec /usr/bin/chromium \
+  --host-resolver-rules='MAP fixture.example 127.0.0.1' \
+  --ignore-certificate-errors \
+  "$@"
+EOF
 
 cat > "$WORK_DIR/stub-llama-server" <<'EOF'
 #!/usr/bin/env perl
@@ -163,8 +268,52 @@ printf '%s\n' "$@" > /output/forward-log.txt
 exit 0
 EOF
 
-chmod +x "$WORK_DIR/stub-llama-server" "$WORK_DIR/stub-groovy-agent"
+chmod +x "$WORK_DIR/chromium-test-wrapper" "$WORK_DIR/stub-llama-server" "$WORK_DIR/stub-groovy-agent"
 touch "$WORK_DIR/fake-model.gguf"
+
+echo "==> Verifying Chromium-backed local browsing under the default container user"
+timeout 90 "$CONTAINER_ENGINE" run --rm \
+  --add-host fixture.example:93.184.216.34 \
+  -v "$WORK_DIR/chromium-test-wrapper:/tmp/chromium-test-wrapper:ro" \
+  -v "$WORK_DIR/https-fixture:/tmp/https-fixture:ro" \
+  --entrypoint /bin/sh \
+  "$IMAGE_NAME" -ceu '
+    /tmp/https-fixture >/tmp/https-fixture.log 2>&1 &
+    fixture_pid=$!
+    cleanup() {
+      kill -TERM "$fixture_pid" 2>/dev/null || true
+      wait "$fixture_pid" 2>/dev/null || true
+    }
+    trap cleanup EXIT INT TERM
+    attempts=0
+    until curl -fkSs https://127.0.0.1:9443/ >/dev/null 2>&1; do
+      if ! kill -0 "$fixture_pid" 2>/dev/null; then
+        cat /tmp/https-fixture.log >&2 || true
+        exit 1
+      fi
+      attempts=$((attempts + 1))
+      if [ "$attempts" -ge 20 ]; then
+        echo "fixture did not become ready in time" >&2
+        cat /tmp/https-fixture.log >&2 || true
+        exit 1
+      fi
+      sleep 1
+    done
+    timeout 30 /tmp/chromium-test-wrapper \
+      --headless \
+      $WEBUTILS_CHROME_ARGS \
+      --disable-gpu \
+      --remote-debugging-port=0 \
+      --dump-dom "https://fixture.example:9443/" >/tmp/fixture-dom.txt 2>/dev/null || status=$?
+    case "${status:-0}" in
+      0|124) ;;
+      *) exit "${status}" ;;
+    esac
+    grep -q "<title>Fixture OK</title>" /tmp/fixture-dom.txt
+    grep -q "non-root chromium fixture page" /tmp/fixture-dom.txt
+    grep -q "https://fixture.example:9443/next" /tmp/fixture-dom.txt
+  '
+echo "    local HTTPS fixture browsing succeeded under uid ${EXPECTED_UID}"
 
 run_forwarding_case() {
   local case_name="$1"
@@ -549,10 +698,20 @@ until "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" 2>&1 | grep -q "listening for M
   sleep 1
 done
 
-if ! "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" 2>&1 | grep -q "WARNING: MCP_HTTP_TOKEN is not set"; then
-  echo "FAIL: expected an unauthenticated-exposure warning without MCP_HTTP_TOKEN" >&2
-  exit 1
-fi
+warning_deadline=$((SECONDS + 15))
+until "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" 2>&1 | grep -q "WARNING: MCP_HTTP_TOKEN is not set"; do
+  if (( SECONDS >= warning_deadline )); then
+    echo "FAIL: expected an unauthenticated-exposure warning without MCP_HTTP_TOKEN" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  if [[ "$("$CONTAINER_ENGINE" inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" != "true" ]]; then
+    echo "FAIL: mcp container exited before logging the missing-token warning" >&2
+    "$CONTAINER_ENGINE" logs "$CONTAINER_NAME" >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
 echo "    coreutils-mcp is listening and warns about the missing bearer token"
 
 initialize_response="$("$CONTAINER_ENGINE" exec "$CONTAINER_NAME" curl -fsS \
