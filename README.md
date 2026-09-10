@@ -597,8 +597,9 @@ single closed-schema tool:
   ```
 
   This is useful when the browser is not on `PATH` or a system launcher is
-  present but unusable. When unset, `chromedp` keeps its normal executable
-  discovery behavior.
+  present but unusable. When unset, `webutils-mcp` first runs a browser
+  preflight across common Chromium/Chrome locations, then launches Chromium
+  with the default `chromedp` discovery path.
 
 Container/`docker/entrypoint.sh` environment variables:
 

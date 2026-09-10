@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -110,7 +109,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	defer cancel()
 
 	configuredExecutable := configuredChromiumExecutable(b.getenv)
-	if err := validateChromiumExecutable(runCtx, configuredExecutable, b.lookPath, b.probeExecutable); err != nil {
+	if err := validateChromiumExecutable(runCtx, configuredExecutable, b.lookPath, b.getenv, b.probeExecutable); err != nil {
 		return BrowseResult{}, err
 	}
 
@@ -264,7 +263,10 @@ func execAllocatorOptions(profileDir, executable string, output io.Writer) []chr
 	return options
 }
 
-func validateChromiumExecutable(ctx context.Context, configured string, lookPath func(string) (string, error), probe func(context.Context, string) error) error {
+func validateChromiumExecutable(ctx context.Context, configured string, lookPath func(string) (string, error), getenv func(string) string, probe func(context.Context, string) error) error {
+	if lookPath == nil {
+		return errors.New("browser executable lookup is not configured")
+	}
 	if probe == nil {
 		return errors.New("browser preflight probe is not configured")
 	}
@@ -278,7 +280,7 @@ func validateChromiumExecutable(ctx context.Context, configured string, lookPath
 		}
 		return nil
 	}
-	resolved, err := discoverChromiumExecutable(lookPath)
+	resolved, err := discoverChromiumExecutable(lookPath, getenv)
 	if err != nil {
 		return fmt.Errorf("Chromium or Chrome is required for browse_url. Install it and make sure it is available on PATH, or configure %s to a working executable path: %w", chromeExecutableEnvVar, err)
 	}
@@ -288,35 +290,44 @@ func validateChromiumExecutable(ctx context.Context, configured string, lookPath
 	return nil
 }
 
-func discoverChromiumExecutable(lookPath func(string) (string, error)) (string, error) {
+func discoverChromiumExecutable(lookPath func(string) (string, error), getenv func(string) string) (string, error) {
 	if lookPath == nil {
 		return "", errors.New("executable lookup is not configured")
 	}
-	for _, candidate := range chromiumExecutableCandidates() {
+	candidates := chromiumExecutableCandidates(runtime.GOOS, getenv)
+	for _, candidate := range candidates {
 		resolved, err := lookPath(candidate)
 		if err == nil {
 			return resolved, nil
 		}
 	}
-	return "", fmt.Errorf("no Chromium/Chrome executable found in PATH or standard locations (%s)", strings.Join(chromiumExecutableCandidates(), ", "))
+	return "", fmt.Errorf("no Chromium/Chrome executable found in PATH or standard locations (%s)", strings.Join(candidates, ", "))
 }
 
-func chromiumExecutableCandidates() []string {
-	switch runtime.GOOS {
+func chromiumExecutableCandidates(goos string, getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	switch goos {
 	case "darwin":
 		return []string{
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"Chromium",
+			"Google Chrome",
+			"chromium",
+			"google-chrome",
+			"chrome",
 		}
 	case "windows":
-		userProfile := os.Getenv("USERPROFILE")
+		userProfile := getenv("USERPROFILE")
 		return []string{
 			"chrome",
 			"chrome.exe",
 			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
 			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
-			filepath.Join(userProfile, `AppData\Local\Google\Chrome\Application\chrome.exe`),
-			filepath.Join(userProfile, `AppData\Local\Chromium\Application\chrome.exe`),
+			joinWindowsPath(userProfile, `AppData\Local\Google\Chrome\Application\chrome.exe`),
+			joinWindowsPath(userProfile, `AppData\Local\Chromium\Application\chrome.exe`),
 		}
 	default:
 		return []string{
@@ -334,6 +345,14 @@ func chromiumExecutableCandidates() []string {
 			"chrome",
 		}
 	}
+}
+
+func joinWindowsPath(base, tail string) string {
+	base = strings.TrimRight(base, `\/`)
+	if base == "" {
+		return tail
+	}
+	return base + `\` + tail
 }
 
 func probeChromiumExecutable(ctx context.Context, executable string) error {

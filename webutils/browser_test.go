@@ -30,7 +30,7 @@ func TestDiscoverChromiumExecutableUsesChromedpSearchOrder(t *testing.T) {
 			return "/usr/bin/chromium", nil
 		}
 		return "", exec.ErrNotFound
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("discoverChromiumExecutable returned error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestValidateChromiumExecutableRejectsMissingConfiguredPath(t *testing.T) {
 			t.Fatalf("unexpected executable lookup: %q", candidate)
 		}
 		return "", exec.ErrNotFound
-	}, func(context.Context, string) error {
+	}, nil, func(context.Context, string) error {
 		t.Fatal("probe should not run when lookup fails")
 		return nil
 	})
@@ -66,7 +66,7 @@ func TestValidateChromiumExecutableRejectsMissingConfiguredPath(t *testing.T) {
 func TestValidateChromiumExecutableRejectsMissingAutoDiscoveredBrowser(t *testing.T) {
 	err := validateChromiumExecutable(context.Background(), "", func(string) (string, error) {
 		return "", exec.ErrNotFound
-	}, func(context.Context, string) error {
+	}, nil, func(context.Context, string) error {
 		t.Fatal("probe should not run when discovery fails")
 		return nil
 	})
@@ -85,7 +85,7 @@ func TestValidateChromiumExecutableRejectsBrokenAutoDiscoveredBrowser(t *testing
 			return "/snap/bin/chromium", nil
 		}
 		return "", exec.ErrNotFound
-	}, func(_ context.Context, executable string) error {
+	}, nil, func(_ context.Context, executable string) error {
 		if executable != "/snap/bin/chromium" {
 			t.Fatalf("unexpected executable probe: %q", executable)
 		}
@@ -128,5 +128,18 @@ func TestChromiumBrowserBrowseFailsPreflightWithoutLaunchingBrowser(t *testing.T
 	}
 	if !strings.Contains(err.Error(), chromeExecutableEnvVar) || !strings.Contains(err.Error(), "/missing/chrome") {
 		t.Fatalf("expected browse error to mention configured executable guidance, got %q", err)
+	}
+}
+
+func TestChromiumExecutableCandidatesUseInjectedUserProfile(t *testing.T) {
+	candidates := chromiumExecutableCandidates("windows", func(key string) string {
+		if key != "USERPROFILE" {
+			t.Fatalf("unexpected env lookup: %q", key)
+		}
+		return `C:\Users\alice`
+	})
+	joined := strings.Join(candidates, "\n")
+	if !strings.Contains(joined, `C:\Users\alice\AppData\Local\Google\Chrome\Application\chrome.exe`) {
+		t.Fatalf("expected injected USERPROFILE path in candidates, got %#v", candidates)
 	}
 }
