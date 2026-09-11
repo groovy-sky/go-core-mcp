@@ -467,7 +467,7 @@ func findNonLoopbackIPv4(t *testing.T) string {
 				continue
 			}
 			ip := ipNet.IP.To4()
-			if ip == nil || !ip.IsGlobalUnicast() {
+			if ip == nil || ip.IsLoopback() || ip.IsMulticast() || ip.IsUnspecified() {
 				continue
 			}
 			return ip.String()
