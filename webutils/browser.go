@@ -162,13 +162,18 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 			}
 		case *fetch.EventRequestPaused:
 			go func(evt *fetch.EventRequestPaused) {
+				// Fetch callbacks run on a separate goroutine, so execute CDP
+				// actions through chromedp.Run to bind the active target executor.
 				requestURL := strings.TrimSpace(evt.Request.URL)
 				if _, err := validateAndResolveURL(browserCtx, b.resolver, requestURL); err != nil {
-					_ = fetch.FailRequest(evt.RequestID, network.ErrorReasonBlockedByClient).Do(browserCtx)
+					if failErr := chromedp.Run(browserCtx, fetch.FailRequest(evt.RequestID, network.ErrorReasonBlockedByClient)); failErr != nil {
+						setCheckErr(fmt.Errorf("fail request: %w", failErr))
+						return
+					}
 					setCheckErr(fmt.Errorf("blocked request %q: %w", requestURL, err))
 					return
 				}
-				if err := fetch.ContinueRequest(evt.RequestID).Do(browserCtx); err != nil {
+				if err := chromedp.Run(browserCtx, fetch.ContinueRequest(evt.RequestID)); err != nil {
 					setCheckErr(fmt.Errorf("continue request: %w", err))
 				}
 			}(typed)
