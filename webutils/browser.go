@@ -31,6 +31,10 @@ const (
 	defaultMaxLinks         = 40
 	defaultMaxLinkTextChars = 200
 	defaultMaxScreenshotB   = 1 << 20
+	defaultMaxActions       = 8
+	defaultMaxActionType    = 32
+	defaultMaxSelectorChars = 512
+	defaultMaxActionValue   = 2000
 	chromeExecutableEnvVar  = "WEBUTILS_CHROME_EXECUTABLE"
 	chromeArgsEnvVar        = "WEBUTILS_CHROME_ARGS"
 	defaultChromeExecutable = "/usr/bin/chromium"
@@ -41,6 +45,13 @@ const (
 	extractionReadability   = "readability_markdown"
 	extractionRenderedDOM   = "rendered_dom_markdown"
 	extractionInnerText     = "inner_text"
+)
+
+const (
+	browserActionWaitVisible = "wait_visible"
+	browserActionClick       = "click"
+	browserActionSetValue    = "set_value"
+	browserActionType        = "type"
 )
 
 const (
@@ -78,6 +89,10 @@ type Limits struct {
 	MaxLinkTextChars    int
 	MaxRedirects        int
 	MaxScreenshotBytes  int
+	MaxActions          int
+	MaxActionTypeChars  int
+	MaxSelectorChars    int
+	MaxActionValueChars int
 }
 
 func DefaultLimits() Limits {
@@ -89,7 +104,17 @@ func DefaultLimits() Limits {
 		MaxLinkTextChars:    defaultMaxLinkTextChars,
 		MaxRedirects:        8,
 		MaxScreenshotBytes:  defaultMaxScreenshotB,
+		MaxActions:          defaultMaxActions,
+		MaxActionTypeChars:  defaultMaxActionType,
+		MaxSelectorChars:    defaultMaxSelectorChars,
+		MaxActionValueChars: defaultMaxActionValue,
 	}
+}
+
+type BrowserAction struct {
+	Type     string `json:"type"`
+	Selector string `json:"selector"`
+	Value    string `json:"value,omitempty"`
 }
 
 type BrowseRequest struct {
@@ -97,6 +122,7 @@ type BrowseRequest struct {
 	MaxTextChars      int
 	CaptureScreenshot bool
 	ScreenshotMode    string
+	Actions           []BrowserAction
 }
 
 type Link struct {
@@ -142,6 +168,9 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	}
 	targetURL, err := validateAndResolveURL(ctx, b.resolver, req.URL)
 	if err != nil {
+		return BrowseResult{}, err
+	}
+	if err := validateBrowserActions(req.Actions, limits); err != nil {
 		return BrowseResult{}, err
 	}
 	execPath, err := resolveChromeExecutablePath()
@@ -250,13 +279,22 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	)
 	actions := []chromedp.Action{
 		chromedp.Navigate(targetURL.String()),
+	}
+	for i, action := range req.Actions {
+		steps, err := chromedpActionsForBrowserAction(i, action)
+		if err != nil {
+			return BrowseResult{}, err
+		}
+		actions = append(actions, steps...)
+	}
+	actions = append(actions,
 		chromedp.Location(&finalURL),
 		chromedp.Title(&title),
 		chromedp.Evaluate(`(() => (document.body ? document.body.innerText : ""))()`, &text),
 		chromedp.Evaluate(`(() => (document.baseURI || window.location.href || ""))()`, &pageBaseURL),
 		chromedp.Evaluate(`(() => (document.documentElement ? document.documentElement.outerHTML : ""))()`, &renderedHTML),
 		chromedp.Evaluate(`(() => Array.from(document.querySelectorAll("a[href]")).map((a) => ({text: (a.innerText || a.textContent || "").trim(), url: a.href})))()`, &rawLinks),
-	}
+	)
 	if req.CaptureScreenshot {
 		if normalizeScreenshotMode(req.ScreenshotMode) == screenshotModeFullPage {
 			actions = append(actions, chromedp.FullScreenshot(&screenshotPNG, 90))
@@ -350,7 +388,133 @@ func normalizeLimits(limits Limits) Limits {
 	if limits.MaxScreenshotBytes <= 0 {
 		limits.MaxScreenshotBytes = defaults.MaxScreenshotBytes
 	}
+	if limits.MaxActions <= 0 {
+		limits.MaxActions = defaults.MaxActions
+	}
+	if limits.MaxActionTypeChars <= 0 {
+		limits.MaxActionTypeChars = defaults.MaxActionTypeChars
+	}
+	if limits.MaxSelectorChars <= 0 {
+		limits.MaxSelectorChars = defaults.MaxSelectorChars
+	}
+	if limits.MaxActionValueChars <= 0 {
+		limits.MaxActionValueChars = defaults.MaxActionValueChars
+	}
 	return limits
+}
+
+func validateBrowserActions(actions []BrowserAction, limits Limits) error {
+	limits = normalizeLimits(limits)
+	if len(actions) > limits.MaxActions {
+		return fmt.Errorf("browser actions exceed the maximum count of %d", limits.MaxActions)
+	}
+	for i, action := range actions {
+		actionType := strings.TrimSpace(action.Type)
+		if actionType == "" {
+			return fmt.Errorf("browser action %d type is required", i+1)
+		}
+		if len(action.Type) > limits.MaxActionTypeChars {
+			return fmt.Errorf("browser action %d type is too long", i+1)
+		}
+		selector := strings.TrimSpace(action.Selector)
+		if selector == "" {
+			return fmt.Errorf("browser action %d (%s) selector is required", i+1, actionType)
+		}
+		if len(action.Selector) > limits.MaxSelectorChars {
+			return fmt.Errorf("browser action %d (%s) selector is too long", i+1, actionType)
+		}
+		trimmedValue := strings.TrimSpace(action.Value)
+		switch actionType {
+		case browserActionWaitVisible, browserActionClick:
+			if trimmedValue != "" {
+				return fmt.Errorf("browser action %d (%s) does not accept a value", i+1, actionType)
+			}
+		case browserActionSetValue, browserActionType:
+			if trimmedValue == "" {
+				return fmt.Errorf("browser action %d (%s) value is required", i+1, actionType)
+			}
+		default:
+			return fmt.Errorf("unsupported browser action type %q", actionType)
+		}
+		if len(action.Value) > limits.MaxActionValueChars {
+			return fmt.Errorf("browser action %d (%s) value is too long", i+1, actionType)
+		}
+	}
+	return nil
+}
+
+func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromedp.Action, error) {
+	actionType := strings.TrimSpace(action.Type)
+	selector := strings.TrimSpace(action.Selector)
+	switch actionType {
+	case browserActionWaitVisible:
+		return []chromedp.Action{
+			wrapBrowserAction(index, actionType, chromedp.WaitVisible(selector, chromedp.ByQuery)),
+		}, nil
+	case browserActionClick:
+		return []chromedp.Action{
+			wrapBrowserAction(index, actionType,
+				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				chromedp.Click(selector, chromedp.ByQuery),
+				waitForStablePage(),
+			),
+		}, nil
+	case browserActionSetValue:
+		return []chromedp.Action{
+			wrapBrowserAction(index, actionType,
+				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				chromedp.SetValue(selector, action.Value, chromedp.ByQuery),
+			),
+		}, nil
+	case browserActionType:
+		return []chromedp.Action{
+			wrapBrowserAction(index, actionType,
+				chromedp.WaitVisible(selector, chromedp.ByQuery),
+				chromedp.Focus(selector, chromedp.ByQuery),
+				chromedp.SendKeys(selector, action.Value, chromedp.ByQuery),
+			),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported browser action type %q", actionType)
+	}
+}
+
+func wrapBrowserAction(index int, actionType string, actions ...chromedp.Action) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		for _, action := range actions {
+			if err := action.Do(ctx); err != nil {
+				return fmt.Errorf("browser action %d (%s) failed: %w", index+1, actionType, err)
+			}
+		}
+		return nil
+	})
+}
+
+func waitForStablePage() chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		var (
+			lastURL        string
+			lastReadyState string
+		)
+		for {
+			if err := chromedp.Sleep(100 * time.Millisecond).Do(ctx); err != nil {
+				return err
+			}
+			var currentURL string
+			if err := chromedp.Evaluate(`window.location.href || ""`, &currentURL).Do(ctx); err != nil {
+				return err
+			}
+			var readyState string
+			if err := chromedp.Evaluate(`document.readyState || ""`, &readyState).Do(ctx); err != nil {
+				return err
+			}
+			if readyState == "complete" && currentURL != "" && currentURL == lastURL && lastReadyState == "complete" {
+				return nil
+			}
+			lastURL = currentURL
+			lastReadyState = readyState
+		}
+	})
 }
 
 func normalizeScreenshotMode(mode string) string {

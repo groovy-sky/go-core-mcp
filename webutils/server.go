@@ -99,13 +99,14 @@ func (s *Server) listTools() mcpproto.ListToolsResult {
 	return mcpproto.ListToolsResult{
 		Tools: []mcpproto.Tool{{
 			Name:        toolNameBrowseURL,
-			Description: "Browse one public HTTPS page with a fresh headless Chromium instance and return bounded extracted content, visible text, links, and optional screenshot.",
-			InputSchema: mustJSON(inputSchema()),
+			Description: "Browse one public HTTPS page with a fresh headless Chromium instance, optionally execute sequential CSS-selector actions after navigation, and return bounded extracted content, visible text, links, and optional screenshot.",
+			InputSchema: mustJSON(inputSchema(s.limits)),
 		}},
 	}
 }
 
-func inputSchema() map[string]any {
+func inputSchema(limits Limits) map[string]any {
+	limits = normalizeLimits(limits)
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -130,10 +131,90 @@ func inputSchema() map[string]any {
 				"description": "Screenshot capture mode when capture_screenshot is true.",
 				"enum":        []any{screenshotModeViewport, screenshotModeFullPage},
 			},
+			"actions": map[string]any{
+				"type":        "array",
+				"description": "Optional browser actions to execute sequentially after navigation and before content extraction or screenshot capture.",
+				"maxItems":    limits.MaxActions,
+				"items":       browserActionSchema(limits),
+			},
 		},
 		"required":             []any{"url"},
 		"additionalProperties": false,
 	}
+}
+
+func browserActionSchema(limits Limits) map[string]any {
+	baseType := map[string]any{
+		"type":        "string",
+		"description": "Browser action type.",
+		"minLength":   1,
+		"maxLength":   limits.MaxActionTypeChars,
+	}
+	selector := map[string]any{
+		"type":        "string",
+		"description": "CSS selector for the target element.",
+		"minLength":   1,
+		"maxLength":   limits.MaxSelectorChars,
+	}
+	value := map[string]any{
+		"type":        "string",
+		"description": "Action value for set_value and type actions.",
+		"minLength":   1,
+		"maxLength":   limits.MaxActionValueChars,
+	}
+	return map[string]any{
+		"anyOf": []any{
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionWaitVisible}}),
+					"selector": selector,
+				},
+				"required":             []any{"type", "selector"},
+				"additionalProperties": false,
+			},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionClick}}),
+					"selector": selector,
+				},
+				"required":             []any{"type", "selector"},
+				"additionalProperties": false,
+			},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionSetValue}}),
+					"selector": selector,
+					"value":    value,
+				},
+				"required":             []any{"type", "selector", "value"},
+				"additionalProperties": false,
+			},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionType}}),
+					"selector": selector,
+					"value":    value,
+				},
+				"required":             []any{"type", "selector", "value"},
+				"additionalProperties": false,
+			},
+		},
+	}
+}
+
+func mergeSchema(base map[string]any, extra map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(extra))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
 }
 
 func mustJSON(value any) json.RawMessage {
@@ -152,7 +233,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 	if params.Name != toolNameBrowseURL {
 		return errorResult(mcpproto.ErrorUnknownTool, "tool is not available")
 	}
-	arguments, err := jsonschema.ValidateRaw(inputSchema(), params.Arguments)
+	arguments, err := jsonschema.ValidateRaw(inputSchema(s.limits), params.Arguments)
 	if err != nil {
 		return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
 	}
@@ -161,6 +242,7 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 		MaxTextChars:      optionalInt(arguments, "max_text_chars"),
 		CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
 		ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
+		Actions:           optionalBrowserActions(arguments, "actions"),
 	}
 	result, err := s.browser.Browse(ctx, request)
 	if err != nil {
@@ -210,6 +292,26 @@ func optionalString(arguments map[string]any, key string) string {
 		return ""
 	}
 	return value
+}
+
+func optionalBrowserActions(arguments map[string]any, key string) []BrowserAction {
+	items, ok := arguments[key].([]any)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	actions := make([]BrowserAction, 0, len(items))
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		actions = append(actions, BrowserAction{
+			Type:     optionalString(object, "type"),
+			Selector: optionalString(object, "selector"),
+			Value:    optionalString(object, "value"),
+		})
+	}
+	return actions
 }
 
 func classifyError(err error) (string, string) {
