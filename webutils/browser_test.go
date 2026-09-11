@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -245,7 +244,7 @@ func makeExecutable(t *testing.T, name string) string {
 func TestChromiumBrowserBrowseContinuesInterceptedRequests(t *testing.T) {
 	chromePath := findChromeExecutable(t)
 	server, tracker := newBrowserFixtureServer(t, false)
-	wrapperPath := makeChromeWrapper(t, chromePath, fixtureListenerIP(t, server), "allowed.example")
+	wrapperPath := makeChromeWrapper(t, chromePath, "127.0.0.1", "allowed.example")
 	t.Setenv(chromeExecutableEnvVar, wrapperPath)
 	t.Setenv(chromeArgsEnvVar, "--no-sandbox --disable-dev-shm-usage")
 
@@ -288,7 +287,7 @@ func TestChromiumBrowserBrowseContinuesInterceptedRequests(t *testing.T) {
 func TestChromiumBrowserBrowseBlocksDisallowedSubresourceRequest(t *testing.T) {
 	chromePath := findChromeExecutable(t)
 	server, tracker := newBrowserFixtureServer(t, true)
-	wrapperPath := makeChromeWrapper(t, chromePath, fixtureListenerIP(t, server), "allowed.example", "blocked.example")
+	wrapperPath := makeChromeWrapper(t, chromePath, "127.0.0.1", "allowed.example", "blocked.example")
 	t.Setenv(chromeExecutableEnvVar, wrapperPath)
 	t.Setenv(chromeArgsEnvVar, "--no-sandbox --disable-dev-shm-usage")
 
@@ -325,9 +324,9 @@ func findChromeExecutable(t *testing.T) string {
 	t.Helper()
 
 	for _, candidate := range []string{
-		"/usr/bin/chromium",
 		"/usr/bin/google-chrome",
 		"/opt/google/chrome/chrome",
+		"/usr/bin/chromium",
 		"/usr/bin/chromium-browser",
 	} {
 		info, err := os.Stat(candidate)
@@ -367,16 +366,6 @@ func fixtureURL(t *testing.T, server *httptest.Server, host, path string) string
 	return "https://" + host + ":" + port + path
 }
 
-func fixtureListenerIP(t *testing.T, server *httptest.Server) string {
-	t.Helper()
-
-	host, _, err := net.SplitHostPort(server.Listener.Addr().String())
-	if err != nil {
-		t.Fatalf("split fixture listener address: %v", err)
-	}
-	return host
-}
-
 type browserFixtureTracker struct {
 	mu     sync.Mutex
 	counts map[string]int
@@ -398,14 +387,8 @@ func newBrowserFixtureServer(t *testing.T, includeBlockedScript bool) (*httptest
 	t.Helper()
 
 	tracker := &browserFixtureTracker{counts: make(map[string]int)}
-	listenIP := findNonLoopbackIPv4(t)
-	listener, err := net.Listen("tcp4", net.JoinHostPort(listenIP, "0"))
-	if err != nil {
-		t.Fatalf("listen on %s: %v", listenIP, err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var blockedPort string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if parsedHost, _, err := net.SplitHostPort(r.Host); err == nil {
 			host = parsedHost
@@ -414,7 +397,7 @@ func newBrowserFixtureServer(t *testing.T, includeBlockedScript bool) (*httptest
 
 		blockedScript := ""
 		if includeBlockedScript {
-			blockedScript = fmt.Sprintf(`<script defer src="https://blocked.example:%s/blocked.js"></script>`, port)
+			blockedScript = fmt.Sprintf(`<script defer src="https://blocked.example:%s/blocked.js"></script>`, blockedPort)
 		}
 
 		switch r.URL.Path {
@@ -440,39 +423,10 @@ func newBrowserFixtureServer(t *testing.T, includeBlockedScript bool) (*httptest
 			http.NotFound(w, r)
 		}
 	}))
-	server.Listener = listener
-	server.StartTLS()
 	t.Cleanup(server.Close)
-	return server, tracker
-}
-
-func findNonLoopbackIPv4(t *testing.T) string {
-	t.Helper()
-
-	interfaces, err := net.Interfaces()
+	_, blockedPort, err := net.SplitHostPort(server.Listener.Addr().String())
 	if err != nil {
-		t.Fatalf("list network interfaces: %v", err)
+		t.Fatalf("split fixture listener address: %v", err)
 	}
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok || ipNet.IP == nil {
-				continue
-			}
-			ip := ipNet.IP.To4()
-			if ip == nil || ip.IsLoopback() || ip.IsMulticast() || ip.IsUnspecified() {
-				continue
-			}
-			return ip.String()
-		}
-	}
-	t.Skip("no non-loopback IPv4 address available for browser integration test")
-	return ""
+	return server, tracker
 }
