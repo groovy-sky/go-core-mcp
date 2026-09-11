@@ -63,3 +63,42 @@ func TestValidateRejectsUnsupportedSchemaTypes(t *testing.T) {
 		t.Fatal("expected an unsupported schema type to be rejected")
 	}
 }
+
+func TestValidateRawAnyOfObjectBranching(t *testing.T) {
+	schema := map[string]any{
+		"anyOf": []any{
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type": map[string]any{"enum": []any{"click"}},
+					"path": map[string]any{"type": "string", "minLength": 1},
+				},
+				"required":             []any{"type", "path"},
+				"additionalProperties": false,
+			},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":  map[string]any{"enum": []any{"type"}},
+					"path":  map[string]any{"type": "string", "minLength": 1},
+					"value": map[string]any{"type": "string", "minLength": 1},
+				},
+				"required":             []any{"type", "path", "value"},
+				"additionalProperties": false,
+			},
+		},
+	}
+
+	if _, err := ValidateRaw(schema, json.RawMessage(`{"type":"click","path":"#ok"}`)); err != nil {
+		t.Fatalf("expected click branch to validate: %v", err)
+	}
+	if _, err := ValidateRaw(schema, json.RawMessage(`{"type":"type","path":"#ok","value":"hello"}`)); err != nil {
+		t.Fatalf("expected type branch to validate: %v", err)
+	}
+	if _, err := ValidateRaw(schema, json.RawMessage(`{"type":"type","path":"#ok"}`)); err == nil || err.Error() != `arguments is missing required property "value"` {
+		t.Fatalf("expected missing value error, got %v", err)
+	}
+	if _, err := ValidateRaw(schema, json.RawMessage(`{"type":"submit","path":"#ok"}`)); err == nil || err.Error() != "type is not one of the allowed values" {
+		t.Fatalf("expected enum error for unsupported type, got %v", err)
+	}
+}

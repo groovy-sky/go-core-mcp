@@ -55,8 +55,9 @@ func TestToolSchemaAndListWiring(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected actions.items object schema, got %+v", actions["items"])
 	}
-	if items["additionalProperties"] != false {
-		t.Fatalf("expected closed action object schema, got %+v", items)
+	anyOf, ok := items["anyOf"].([]any)
+	if !ok || len(anyOf) != 4 {
+		t.Fatalf("expected actions.items anyOf schema, got %+v", items)
 	}
 	mode, ok := properties["screenshot_mode"].(map[string]any)
 	if !ok {
@@ -168,6 +169,16 @@ func TestCallToolRejectsInvalidActionObjects(t *testing.T) {
 			name:        "action empty selector",
 			raw:         json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","actions":[{"type":"click","selector":""}]}}`),
 			wantMessage: "actions[0].selector is too short",
+		},
+		{
+			name:        "unsupported action type",
+			raw:         json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","actions":[{"type":"submit","selector":"#ok"}]}}`),
+			wantMessage: "actions[0].type is not one of the allowed values",
+		},
+		{
+			name:        "missing action value",
+			raw:         json.RawMessage(`{"name":"browse_url","arguments":{"url":"https://example.com","actions":[{"type":"type","selector":"#ok"}]}}`),
+			wantMessage: `actions[0] is missing required property "value"`,
 		},
 	}
 	for _, tc := range testCases {

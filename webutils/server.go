@@ -135,35 +135,86 @@ func inputSchema(limits Limits) map[string]any {
 				"type":        "array",
 				"description": "Optional browser actions to execute sequentially after navigation and before content extraction or screenshot capture.",
 				"maxItems":    limits.MaxActions,
-				"items": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"type": map[string]any{
-							"type":        "string",
-							"description": "Browser action type.",
-							"minLength":   1,
-							"maxLength":   limits.MaxActionTypeChars,
-						},
-						"selector": map[string]any{
-							"type":        "string",
-							"description": "CSS selector for the target element.",
-							"minLength":   1,
-							"maxLength":   limits.MaxSelectorChars,
-						},
-						"value": map[string]any{
-							"type":        "string",
-							"description": "Action value for set_value and type actions.",
-							"maxLength":   limits.MaxActionValueChars,
-						},
-					},
-					"required":             []any{"type", "selector"},
-					"additionalProperties": false,
-				},
+				"items":       browserActionSchema(limits),
 			},
 		},
 		"required":             []any{"url"},
 		"additionalProperties": false,
 	}
+}
+
+func browserActionSchema(limits Limits) map[string]any {
+	baseType := map[string]any{
+		"type":        "string",
+		"description": "Browser action type.",
+		"minLength":   1,
+		"maxLength":   limits.MaxActionTypeChars,
+	}
+	selector := map[string]any{
+		"type":        "string",
+		"description": "CSS selector for the target element.",
+		"minLength":   1,
+		"maxLength":   limits.MaxSelectorChars,
+	}
+	value := map[string]any{
+		"type":        "string",
+		"description": "Action value for set_value and type actions.",
+		"minLength":   1,
+		"maxLength":   limits.MaxActionValueChars,
+	}
+	return map[string]any{
+		"anyOf": []any{
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionWaitVisible}}),
+					"selector": selector,
+				},
+				"required":             []any{"type", "selector"},
+				"additionalProperties": false,
+			},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionClick}}),
+					"selector": selector,
+				},
+				"required":             []any{"type", "selector"},
+				"additionalProperties": false,
+			},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionSetValue}}),
+					"selector": selector,
+					"value":    value,
+				},
+				"required":             []any{"type", "selector", "value"},
+				"additionalProperties": false,
+			},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type":     mergeSchema(baseType, map[string]any{"enum": []any{browserActionType}}),
+					"selector": selector,
+					"value":    value,
+				},
+				"required":             []any{"type", "selector", "value"},
+				"additionalProperties": false,
+			},
+		},
+	}
+}
+
+func mergeSchema(base map[string]any, extra map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(extra))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
 }
 
 func mustJSON(value any) json.RawMessage {

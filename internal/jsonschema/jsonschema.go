@@ -49,6 +49,11 @@ func validate(schema map[string]any, value any, path string) error {
 			return fmt.Errorf("%s is not one of the allowed values", where)
 		}
 	}
+	if branches, ok := schema["anyOf"].([]any); ok {
+		if err := validateAnyOf(branches, value, path, where); err != nil {
+			return err
+		}
+	}
 
 	switch schemaType, _ := schema["type"].(string); schemaType {
 	case "object":
@@ -132,6 +137,58 @@ func validate(schema map[string]any, value any, path string) error {
 		return fmt.Errorf("%s uses an unsupported schema type", where)
 	}
 	return nil
+}
+
+func validateAnyOf(branches []any, value any, path, where string) error {
+	if typed, ok := value.(map[string]any); ok {
+		if branch, ok := selectSchemaBranch(branches, typed); ok {
+			return validate(branch, value, path)
+		}
+	}
+	var firstErr error
+	for _, branch := range branches {
+		schema, ok := branch.(map[string]any)
+		if !ok {
+			continue
+		}
+		if err := validate(schema, value, path); err == nil {
+			return nil
+		} else if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	return fmt.Errorf("%s does not match any allowed schema", where)
+}
+
+func selectSchemaBranch(branches []any, value map[string]any) (map[string]any, bool) {
+	actionType, _ := value["type"].(string)
+	for _, branch := range branches {
+		schema, ok := branch.(map[string]any)
+		if !ok {
+			continue
+		}
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			continue
+		}
+		typeSchema, ok := properties["type"].(map[string]any)
+		if !ok {
+			continue
+		}
+		enum, ok := typeSchema["enum"].([]any)
+		if !ok {
+			continue
+		}
+		for _, candidate := range enum {
+			if candidate == actionType {
+				return schema, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func validateRange(schema map[string]any, number float64, where string) error {

@@ -430,6 +430,9 @@ func validateBrowserActions(actions []BrowserAction, limits Limits) error {
 				return fmt.Errorf("browser action %d (%s) does not accept a value", i+1, actionType)
 			}
 		case browserActionSetValue, browserActionType:
+			if trimmedValue == "" {
+				return fmt.Errorf("browser action %d (%s) value is required", i+1, actionType)
+			}
 		default:
 			return fmt.Errorf("unsupported browser action type %q", actionType)
 		}

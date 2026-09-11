@@ -697,6 +697,11 @@ func TestChromiumBrowserBrowseRejectsInvalidActions(t *testing.T) {
 			wantMessage: "browser action 1 (type) value is too long",
 		},
 		{
+			name:        "value required",
+			actions:     []BrowserAction{{Type: browserActionType, Selector: "#ok", Value: " \t "}},
+			wantMessage: "browser action 1 (type) value is required",
+		},
+		{
 			name:        "value not allowed",
 			actions:     []BrowserAction{{Type: browserActionClick, Selector: "#ok", Value: "super-secret-password"}},
 			wantMessage: "browser action 1 (click) does not accept a value",
