@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestNormalizeLimitsUsesDefaultsForZeroValues(t *testing.T) {
@@ -27,10 +28,24 @@ func TestNormalizeLimitsUsesDefaultsForZeroValues(t *testing.T) {
 	}
 }
 
-func TestExtractContentFromHTMLPrefersReadabilityMarkdown(t *testing.T) {
+func TestExtractContentFromHTMLStrategies(t *testing.T) {
 	t.Parallel()
 
-	html := `<!doctype html>
+	longBody := strings.Repeat("Detailed rendered fallback content. ", 12)
+	testCases := []struct {
+		name         string
+		html         string
+		pageURL      string
+		fallbackText string
+		wantContent  string
+		wantFormat   string
+		wantMethod   string
+		contains     []string
+		notContains  []string
+	}{
+		{
+			name: "prefers readability for article",
+			html: `<!doctype html>
 <html>
 <head><title>Ignored</title></head>
 <body>
@@ -43,38 +58,119 @@ func TestExtractContentFromHTMLPrefersReadabilityMarkdown(t *testing.T) {
     <table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>B</td></tr></table>
   </article>
 </body>
-</html>`
+</html>`,
+			pageURL:      "https://example.com/base/page",
+			fallbackText: "fallback text",
+			wantFormat:   contentFormatMarkdown,
+			wantMethod:   extractionReadability,
+			contains:     []string{"Hello World", "[docs](https://example.com/docs)", "- One", "fmt.Println(\"ok\")", "Name"},
+		},
+		{
+			name: "uses semantic rendered dom fallback for app page",
+			html: `<!doctype html>
+<html>
+<body>
+  <nav>Primary navigation</nav>
+  <div id="cookie-banner">Accept cookies</div>
+  <style>.noise { color: red; }</style>
+  <script>window.unwanted = "script noise"</script>
+  <dialog open>Overlay dialog</dialog>
+  <div role="main">
+    <h1>Workspace Dashboard</h1>
+    <p>Open the <a href="/reports">reports</a> for the latest status.</p>
+    <ul><li>Queued</li><li>Ready</li></ul>
+    <table>
+      <tr><th>Name</th><th>Value</th></tr>
+      <tr><td>Build</td><td>Passing</td></tr>
+    </table>
+    <pre><code>go test ./...</code></pre>
+    <img alt="Diagram" src="/images/diagram.png">
+  </div>
+</body>
+</html>`,
+			pageURL:      "https://example.com/base/page",
+			fallbackText: "fallback text",
+			wantFormat:   contentFormatMarkdown,
+			wantMethod:   extractionRenderedDOM,
+			contains: []string{
+				"Workspace Dashboard",
+				"[reports](https://example.com/reports)",
+				"Queued",
+				"Name",
+				"go test ./...",
+				"https://example.com/images/diagram.png",
+			},
+			notContains: []string{"Primary navigation", "Accept cookies", "script noise", "Overlay dialog"},
+		},
+		{
+			name:         "falls back to visible text when html unusable",
+			html:         `<!doctype html><html><body><script>ignored()</script><style>body{display:none}</style><template>hidden</template></body></html>`,
+			pageURL:      "https://example.com",
+			fallbackText: " visible fallback ",
+			wantContent:  "visible fallback",
+			wantFormat:   contentFormatText,
+			wantMethod:   extractionInnerText,
+		},
+		{
+			name: "prefers richer rendered dom over thin readability",
+			html: `<!doctype html>
+<html>
+<body>
+  <article>
+    <h1>Status</h1>
+    <p>Short summary only.</p>
+  </article>
+  <main>
+    <h1>Workspace Guide</h1>
+    <p>` + longBody + `</p>
+    <ul><li>Open backlog</li><li>Run checks</li><li>Ship release</li></ul>
+    <table>
+      <tr><th>Area</th><th>State</th></tr>
+      <tr><td>Build</td><td>Green</td></tr>
+    </table>
+    <pre><code>go test ./webutils</code></pre>
+  </main>
+</body>
+</html>`,
+			pageURL:      "https://example.com/docs/app",
+			fallbackText: "fallback text",
+			wantFormat:   contentFormatMarkdown,
+			wantMethod:   extractionRenderedDOM,
+			contains:     []string{"Workspace Guide", "go test ./webutils", "Open backlog", "Area"},
+			notContains:  []string{"fallback text"},
+		},
+	}
 
-	content, format, method := extractContentFromHTML(html, "https://example.com/base/page", "fallback text")
-	if format != contentFormatMarkdown {
-		t.Fatalf("expected markdown format, got %q", format)
-	}
-	if method != extractionReadability {
-		t.Fatalf("expected readability extraction method, got %q", method)
-	}
-	for _, needle := range []string{"Hello World", "[docs](https://example.com/docs)", "- One", "fmt.Println(\"ok\")", "Name"} {
-		if !strings.Contains(content, needle) {
-			t.Fatalf("expected markdown content to contain %q, got %q", needle, content)
-		}
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			content, format, method := extractContentFromHTML(tc.html, tc.pageURL, tc.fallbackText)
+			if tc.wantContent != "" && content != tc.wantContent {
+				t.Fatalf("expected content %q, got %q", tc.wantContent, content)
+			}
+			if format != tc.wantFormat {
+				t.Fatalf("expected format %q, got %q", tc.wantFormat, format)
+			}
+			if method != tc.wantMethod {
+				t.Fatalf("expected extraction method %q, got %q with content %q", tc.wantMethod, method, content)
+			}
+			for _, needle := range tc.contains {
+				if !strings.Contains(content, needle) {
+					t.Fatalf("expected content to contain %q, got %q", needle, content)
+				}
+			}
+			for _, needle := range tc.notContains {
+				if strings.Contains(content, needle) {
+					t.Fatalf("expected content to omit %q, got %q", needle, content)
+				}
+			}
+		})
 	}
 }
 
-func TestExtractContentFromHTMLFallsBackToVisibleText(t *testing.T) {
-	t.Parallel()
-
-	content, format, method := extractContentFromHTML("", "https://example.com", " visible fallback ")
-	if content != "visible fallback" {
-		t.Fatalf("expected fallback content, got %q", content)
-	}
-	if format != contentFormatText {
-		t.Fatalf("expected text format, got %q", format)
-	}
-	if method != extractionInnerText {
-		t.Fatalf("expected fallback extraction method, got %q", method)
-	}
-}
-
-func TestExtractContentFromHTMLAppliesTruncationLimit(t *testing.T) {
+func TestClampStringAppliesTruncationLimit(t *testing.T) {
 	t.Parallel()
 
 	content, _, _ := extractContentFromHTML(`<html><body><article><h1>Heading</h1><p>alpha beta gamma</p></article></body></html>`, "https://example.com", "fallback")
@@ -82,8 +178,23 @@ func TestExtractContentFromHTMLAppliesTruncationLimit(t *testing.T) {
 	if !truncated {
 		t.Fatal("expected content to be truncated")
 	}
-	if len(clamped) != 12 {
-		t.Fatalf("expected clamped content length 12, got %d", len(clamped))
+	if len([]rune(clamped)) != 12 {
+		t.Fatalf("expected clamped content rune length 12, got %d", len([]rune(clamped)))
+	}
+}
+
+func TestClampStringPreservesUTF8Runes(t *testing.T) {
+	t.Parallel()
+
+	clamped, truncated := clampString("🙂世界abc", 3)
+	if !truncated {
+		t.Fatal("expected UTF-8 string to be truncated")
+	}
+	if clamped != "🙂世界" {
+		t.Fatalf("expected UTF-8-safe truncation, got %q", clamped)
+	}
+	if !utf8.ValidString(clamped) {
+		t.Fatalf("expected clamped string to remain valid UTF-8, got %q", clamped)
 	}
 }
 
