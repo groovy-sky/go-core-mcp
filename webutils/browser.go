@@ -424,9 +424,10 @@ func validateBrowserActions(actions []BrowserAction, limits Limits) error {
 		if len(action.Selector) > limits.MaxSelectorChars {
 			return fmt.Errorf("browser action %d (%s) selector is too long", i+1, actionType)
 		}
+		trimmedValue := strings.TrimSpace(action.Value)
 		switch actionType {
 		case browserActionWaitVisible, browserActionClick:
-			if action.Value != "" {
+			if trimmedValue != "" {
 				return fmt.Errorf("browser action %d (%s) does not accept a value", i+1, actionType)
 			}
 		case browserActionSetValue, browserActionType:
