@@ -193,9 +193,6 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 		ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
 		Actions:           optionalBrowserActions(arguments, "actions"),
 	}
-	if err := validateBrowserActions(request.Actions, normalizeLimits(s.limits)); err != nil {
-		return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
-	}
 	result, err := s.browser.Browse(ctx, request)
 	if err != nil {
 		category, message := classifyError(err)
