@@ -3,6 +3,7 @@ package webutils
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,7 +99,7 @@ func (s *Server) listTools() mcpproto.ListToolsResult {
 	return mcpproto.ListToolsResult{
 		Tools: []mcpproto.Tool{{
 			Name:        toolNameBrowseURL,
-			Description: "Browse one public HTTPS page with a fresh headless Chromium instance and return bounded visible text and links.",
+			Description: "Browse one public HTTPS page with a fresh headless Chromium instance and return bounded extracted content, visible text, links, and optional screenshot.",
 			InputSchema: mustJSON(inputSchema()),
 		}},
 	}
@@ -115,9 +116,19 @@ func inputSchema() map[string]any {
 			},
 			"max_text_chars": map[string]any{
 				"type":        "integer",
-				"description": "Maximum visible_text characters in the result.",
+				"description": "Maximum content and visible_text characters in the result.",
 				"minimum":     1,
 				"maximum":     maxAllowedTextChars,
+			},
+			"capture_screenshot": map[string]any{
+				"type":        "boolean",
+				"description": "Capture a PNG screenshot and return it as a separate MCP image content block.",
+				"default":     false,
+			},
+			"screenshot_mode": map[string]any{
+				"type":        "string",
+				"description": "Screenshot capture mode when capture_screenshot is true.",
+				"enum":        []any{screenshotModeViewport, screenshotModeFullPage},
 			},
 		},
 		"required":             []any{"url"},
@@ -146,8 +157,10 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 		return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
 	}
 	request := BrowseRequest{
-		URL:          arguments["url"].(string),
-		MaxTextChars: optionalInt(arguments, "max_text_chars"),
+		URL:               arguments["url"].(string),
+		MaxTextChars:      optionalInt(arguments, "max_text_chars"),
+		CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
+		ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
 	}
 	result, err := s.browser.Browse(ctx, request)
 	if err != nil {
@@ -155,15 +168,26 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 		return errorResult(category, message)
 	}
 	body := map[string]any{
-		"success":      true,
-		"final_url":    result.FinalURL,
-		"title":        result.Title,
-		"visible_text": result.VisibleText,
-		"links":        result.Links,
-		"truncated":    result.Truncated,
+		"success":           true,
+		"final_url":         result.FinalURL,
+		"title":             result.Title,
+		"content":           result.Content,
+		"content_format":    result.ContentFormat,
+		"extraction_method": result.ExtractionMethod,
+		"visible_text":      result.VisibleText,
+		"links":             result.Links,
+		"truncated":         result.Truncated,
+	}
+	content := []mcpproto.Content{{Type: "text", Text: encode(body)}}
+	if len(result.ScreenshotPNG) > 0 {
+		content = append(content, mcpproto.Content{
+			Type:     "image",
+			Data:     base64.StdEncoding.EncodeToString(result.ScreenshotPNG),
+			MIMEType: "image/png",
+		})
 	}
 	return mcpproto.CallToolResult{
-		Content: []mcpproto.Content{{Type: "text", Text: encode(body)}},
+		Content: content,
 	}
 }
 
@@ -175,6 +199,19 @@ func optionalInt(arguments map[string]any, key string) int {
 	return number
 }
 
+func optionalBool(arguments map[string]any, key string) bool {
+	boolean, ok := arguments[key].(bool)
+	return ok && boolean
+}
+
+func optionalString(arguments map[string]any, key string) string {
+	value, ok := arguments[key].(string)
+	if !ok {
+		return ""
+	}
+	return value
+}
+
 func classifyError(err error) (string, string) {
 	if err == nil {
 		return mcpproto.ErrorToolError, "tool execution failed"
@@ -184,6 +221,8 @@ func classifyError(err error) (string, string) {
 		return "invalid_url", err.Error()
 	case errors.Is(err, errHostNotPublic), errors.Is(err, errHostNoPublicAddress):
 		return "disallowed_destination", err.Error()
+	case errors.Is(err, errScreenshotTooLarge):
+		return mcpproto.ErrorResultTooLarge, err.Error()
 	case errors.Is(err, context.DeadlineExceeded):
 		return mcpproto.ErrorTimeout, "browse operation exceeded its time budget"
 	default:

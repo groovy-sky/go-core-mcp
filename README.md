@@ -113,8 +113,8 @@ It also exposes bounded workspace tools:
 - file management: `touch`, `write_file`, `mkdir`, `cp`, `mv`, `rm`, and `rmdir`
 
 When `webutils-mcp` is explicitly enabled and allowlisted, the agent can also
-expose `browse_url` (closed schema: `url` plus optional `max_text_chars`).
-`capture_screenshot` is intentionally not implemented in this MVP.
+expose `browse_url` (closed schema: `url`, optional `max_text_chars`,
+`capture_screenshot`, and `screenshot_mode`).
 
 `cat` is the bounded "print file content" tool. `grep` supports searching either
 one workspace file (`path`) or supplied text (`text`) and always returns bounded
@@ -624,7 +624,14 @@ single closed-schema tool:
 - `browse_url` arguments:
   - `url` (required, HTTPS only)
   - `max_text_chars` (optional, bounded)
-- `capture_screenshot` is intentionally not part of this MVP schema.
+  - `capture_screenshot` (optional, default `false`)
+  - `screenshot_mode` (optional: `viewport` or `full_page`)
+- `browse_url` returns:
+  - structured text metadata (`final_url`, `title`, `content`,
+    `content_format`, `extraction_method`, `visible_text`, `links`,
+    `truncated`) as an MCP text content block
+  - optional PNG screenshot as a separate MCP image content block when
+    `capture_screenshot` is true
 - `WEBUTILS_CHROME_EXECUTABLE` (default unset outside Docker): optional absolute
   Chrome/Chromium executable override. The bundled container image sets it to
   `/usr/bin/chromium`, which wraps the bundled Debian Chromium payload and its

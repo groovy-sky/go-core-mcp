@@ -2,6 +2,7 @@ package webutils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,76 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNormalizeLimitsUsesDefaultsForZeroValues(t *testing.T) {
+	t.Parallel()
+
+	normalized := normalizeLimits(Limits{})
+	defaults := DefaultLimits()
+	if normalized != defaults {
+		t.Fatalf("expected normalized limits to match defaults, got %+v want %+v", normalized, defaults)
+	}
+}
+
+func TestExtractContentFromHTMLPrefersReadabilityMarkdown(t *testing.T) {
+	t.Parallel()
+
+	html := `<!doctype html>
+<html>
+<head><title>Ignored</title></head>
+<body>
+  <nav>navigation noise</nav>
+  <article>
+    <h1>Hello World</h1>
+    <p>Intro with <a href="/docs">docs</a>.</p>
+    <ul><li>One</li><li>Two</li></ul>
+    <pre><code>fmt.Println("ok")</code></pre>
+    <table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>B</td></tr></table>
+  </article>
+</body>
+</html>`
+
+	content, format, method := extractContentFromHTML(html, "https://example.com/base/page", "fallback text")
+	if format != contentFormatMarkdown {
+		t.Fatalf("expected markdown format, got %q", format)
+	}
+	if method != extractionReadability {
+		t.Fatalf("expected readability extraction method, got %q", method)
+	}
+	for _, needle := range []string{"Hello World", "[docs](https://example.com/docs)", "- One", "fmt.Println(\"ok\")", "Name"} {
+		if !strings.Contains(content, needle) {
+			t.Fatalf("expected markdown content to contain %q, got %q", needle, content)
+		}
+	}
+}
+
+func TestExtractContentFromHTMLFallsBackToVisibleText(t *testing.T) {
+	t.Parallel()
+
+	content, format, method := extractContentFromHTML("", "https://example.com", " visible fallback ")
+	if content != "visible fallback" {
+		t.Fatalf("expected fallback content, got %q", content)
+	}
+	if format != contentFormatText {
+		t.Fatalf("expected text format, got %q", format)
+	}
+	if method != extractionInnerText {
+		t.Fatalf("expected fallback extraction method, got %q", method)
+	}
+}
+
+func TestExtractContentFromHTMLAppliesTruncationLimit(t *testing.T) {
+	t.Parallel()
+
+	content, _, _ := extractContentFromHTML(`<html><body><article><h1>Heading</h1><p>alpha beta gamma</p></article></body></html>`, "https://example.com", "fallback")
+	clamped, truncated := clampString(content, 12)
+	if !truncated {
+		t.Fatal("expected content to be truncated")
+	}
+	if len(clamped) != 12 {
+		t.Fatalf("expected clamped content length 12, got %d", len(clamped))
+	}
+}
 
 func TestResolveChromeExecutableUsesConfiguredOverride(t *testing.T) {
 	t.Parallel()
@@ -318,6 +389,63 @@ func TestChromiumBrowserBrowseBlocksDisallowedSubresourceRequest(t *testing.T) {
 	}
 	if tracker.count("blocked.example", "/blocked.js") != 0 {
 		t.Fatal("expected blocked subresource request to be failed before reaching the server")
+	}
+}
+
+func TestChromiumBrowserBrowseCapturesScreenshot(t *testing.T) {
+	chromePath := findChromeExecutable(t)
+	server, _ := newBrowserFixtureServer(t, false)
+	wrapperPath := makeChromeWrapper(t, chromePath, fixtureListenerIP(t, server), "allowed.example")
+	t.Setenv(chromeExecutableEnvVar, wrapperPath)
+	t.Setenv(chromeArgsEnvVar, "--no-sandbox --disable-dev-shm-usage")
+
+	browser := NewChromiumBrowser(DefaultLimits())
+	browser.limits.Timeout = 15 * time.Second
+	browser.resolver = staticResolver{
+		records: map[string][]netip.Addr{
+			"allowed.example": {netip.MustParseAddr("93.184.216.34")},
+		},
+	}
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL:               fixtureURL(t, server, "allowed.example", "/"),
+		CaptureScreenshot: true,
+		ScreenshotMode:    screenshotModeViewport,
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if len(result.ScreenshotPNG) == 0 {
+		t.Fatal("expected screenshot bytes in browse result")
+	}
+}
+
+func TestChromiumBrowserBrowseRejectsOversizedScreenshot(t *testing.T) {
+	chromePath := findChromeExecutable(t)
+	server, _ := newBrowserFixtureServer(t, false)
+	wrapperPath := makeChromeWrapper(t, chromePath, fixtureListenerIP(t, server), "allowed.example")
+	t.Setenv(chromeExecutableEnvVar, wrapperPath)
+	t.Setenv(chromeArgsEnvVar, "--no-sandbox --disable-dev-shm-usage")
+
+	limits := DefaultLimits()
+	limits.MaxScreenshotBytes = 1
+	browser := NewChromiumBrowser(limits)
+	browser.limits.Timeout = 15 * time.Second
+	browser.resolver = staticResolver{
+		records: map[string][]netip.Addr{
+			"allowed.example": {netip.MustParseAddr("93.184.216.34")},
+		},
+	}
+
+	_, err := browser.Browse(context.Background(), BrowseRequest{
+		URL:               fixtureURL(t, server, "allowed.example", "/"),
+		CaptureScreenshot: true,
+	})
+	if err == nil {
+		t.Fatal("expected oversized screenshot to fail")
+	}
+	if !errors.Is(err, errScreenshotTooLarge) {
+		t.Fatalf("expected oversized screenshot error, got %v", err)
 	}
 }
 

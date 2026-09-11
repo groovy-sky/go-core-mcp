@@ -5,11 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	readability "codeberg.org/readeck/go-readability/v2"
+	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
@@ -21,9 +26,16 @@ const (
 	maxAllowedTextChars     = 12000
 	defaultMaxLinks         = 40
 	defaultMaxLinkTextChars = 200
+	defaultMaxScreenshotB   = 1 << 20
 	chromeExecutableEnvVar  = "WEBUTILS_CHROME_EXECUTABLE"
 	chromeArgsEnvVar        = "WEBUTILS_CHROME_ARGS"
 	defaultChromeExecutable = "/usr/bin/chromium"
+	screenshotModeViewport  = "viewport"
+	screenshotModeFullPage  = "full_page"
+	contentFormatMarkdown   = "markdown"
+	contentFormatText       = "text"
+	extractionReadability   = "readability_markdown"
+	extractionInnerText     = "inner_text"
 )
 
 type Limits struct {
@@ -33,6 +45,7 @@ type Limits struct {
 	MaxLinks            int
 	MaxLinkTextChars    int
 	MaxRedirects        int
+	MaxScreenshotBytes  int
 }
 
 func DefaultLimits() Limits {
@@ -43,12 +56,15 @@ func DefaultLimits() Limits {
 		MaxLinks:            defaultMaxLinks,
 		MaxLinkTextChars:    defaultMaxLinkTextChars,
 		MaxRedirects:        8,
+		MaxScreenshotBytes:  defaultMaxScreenshotB,
 	}
 }
 
 type BrowseRequest struct {
-	URL          string
-	MaxTextChars int
+	URL               string
+	MaxTextChars      int
+	CaptureScreenshot bool
+	ScreenshotMode    string
 }
 
 type Link struct {
@@ -57,11 +73,15 @@ type Link struct {
 }
 
 type BrowseResult struct {
-	FinalURL    string `json:"final_url"`
-	Title       string `json:"title"`
-	VisibleText string `json:"visible_text"`
-	Links       []Link `json:"links"`
-	Truncated   bool   `json:"truncated"`
+	FinalURL         string `json:"final_url"`
+	Title            string `json:"title"`
+	Content          string `json:"content"`
+	ContentFormat    string `json:"content_format"`
+	ExtractionMethod string `json:"extraction_method"`
+	VisibleText      string `json:"visible_text"`
+	Links            []Link `json:"links"`
+	Truncated        bool   `json:"truncated"`
+	ScreenshotPNG    []byte `json:"-"`
 }
 
 type Browser interface {
@@ -74,16 +94,19 @@ type ChromiumBrowser struct {
 }
 
 func NewChromiumBrowser(limits Limits) *ChromiumBrowser {
-	return &ChromiumBrowser{limits: limits, resolver: defaultResolver()}
+	return &ChromiumBrowser{limits: normalizeLimits(limits), resolver: defaultResolver()}
 }
 
+var errScreenshotTooLarge = errors.New("screenshot exceeds maximum byte limit")
+
 func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (BrowseResult, error) {
+	limits := normalizeLimits(b.limits)
 	maxChars := req.MaxTextChars
 	if maxChars <= 0 {
-		maxChars = b.limits.DefaultMaxTextChars
+		maxChars = limits.DefaultMaxTextChars
 	}
-	if maxChars > b.limits.MaxAllowedTextChars {
-		maxChars = b.limits.MaxAllowedTextChars
+	if maxChars > limits.MaxAllowedTextChars {
+		maxChars = limits.MaxAllowedTextChars
 	}
 	targetURL, err := validateAndResolveURL(ctx, b.resolver, req.URL)
 	if err != nil {
@@ -104,10 +127,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	}
 	defer os.RemoveAll(profileDir)
 
-	timeout := b.limits.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
+	timeout := limits.Timeout
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -154,7 +174,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 			if typed.RedirectResponse != nil {
 				redirectMtx.Lock()
 				redirects++
-				tooMany := redirects > b.limits.MaxRedirects
+				tooMany := redirects > limits.MaxRedirects
 				redirectMtx.Unlock()
 				if tooMany {
 					setCheckErr(errors.New("redirect limit exceeded"))
@@ -188,18 +208,31 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	}
 
 	var (
-		finalURL string
-		title    string
-		text     string
-		rawLinks []map[string]string
+		finalURL      string
+		title         string
+		text          string
+		renderedHTML  string
+		pageBaseURL   string
+		rawLinks      []map[string]string
+		screenshotPNG []byte
 	)
-	if err := chromedp.Run(browserCtx,
+	actions := []chromedp.Action{
 		chromedp.Navigate(targetURL.String()),
 		chromedp.Location(&finalURL),
 		chromedp.Title(&title),
 		chromedp.Evaluate(`(() => (document.body ? document.body.innerText : ""))()`, &text),
+		chromedp.Evaluate(`(() => (document.baseURI || window.location.href || ""))()`, &pageBaseURL),
+		chromedp.Evaluate(`(() => (document.documentElement ? document.documentElement.outerHTML : ""))()`, &renderedHTML),
 		chromedp.Evaluate(`(() => Array.from(document.querySelectorAll("a[href]")).map((a) => ({text: (a.innerText || a.textContent || "").trim(), url: a.href})))()`, &rawLinks),
-	); err != nil {
+	}
+	if req.CaptureScreenshot {
+		if normalizeScreenshotMode(req.ScreenshotMode) == screenshotModeFullPage {
+			actions = append(actions, chromedp.FullScreenshot(&screenshotPNG, 90))
+		} else {
+			actions = append(actions, chromedp.CaptureScreenshot(&screenshotPNG))
+		}
+	}
+	if err := chromedp.Run(browserCtx, actions...); err != nil {
 		if blocked := getCheckErr(); blocked != nil {
 			return BrowseResult{}, blocked
 		}
@@ -214,11 +247,23 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	if _, err := validateAndResolveURL(ctx, b.resolver, finalURL); err != nil {
 		return BrowseResult{}, fmt.Errorf("final destination is not allowed: %w", err)
 	}
+	if req.CaptureScreenshot && len(screenshotPNG) > limits.MaxScreenshotBytes {
+		return BrowseResult{}, fmt.Errorf("%w: got %d bytes, limit is %d bytes", errScreenshotTooLarge, len(screenshotPNG), limits.MaxScreenshotBytes)
+	}
 
-	text, truncated := clampString(strings.TrimSpace(text), maxChars)
-	links := make([]Link, 0, b.limits.MaxLinks)
+	visibleText := strings.TrimSpace(text)
+	baseURL := strings.TrimSpace(pageBaseURL)
+	if baseURL == "" {
+		baseURL = finalURL
+	}
+	content, contentFormat, extractionMethod := extractContentFromHTML(renderedHTML, baseURL, visibleText)
+	content, contentTruncated := clampString(content, maxChars)
+	visibleText, visibleTextTruncated := clampString(visibleText, maxChars)
+	truncated := contentTruncated || visibleTextTruncated
+
+	links := make([]Link, 0, limits.MaxLinks)
 	for _, item := range rawLinks {
-		if len(links) >= b.limits.MaxLinks {
+		if len(links) >= limits.MaxLinks {
 			truncated = true
 			break
 		}
@@ -229,18 +274,111 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		if _, err := validateAndResolveURL(ctx, b.resolver, linkURL); err != nil {
 			continue
 		}
-		linkText, linkTextTruncated := clampString(strings.TrimSpace(item["text"]), b.limits.MaxLinkTextChars)
+		linkText, linkTextTruncated := clampString(strings.TrimSpace(item["text"]), limits.MaxLinkTextChars)
 		truncated = truncated || linkTextTruncated
 		links = append(links, Link{Text: linkText, URL: linkURL})
 	}
 
 	return BrowseResult{
-		FinalURL:    finalURL,
-		Title:       strings.TrimSpace(title),
-		VisibleText: text,
-		Links:       links,
-		Truncated:   truncated,
+		FinalURL:         finalURL,
+		Title:            strings.TrimSpace(title),
+		Content:          content,
+		ContentFormat:    contentFormat,
+		ExtractionMethod: extractionMethod,
+		VisibleText:      visibleText,
+		Links:            links,
+		Truncated:        truncated,
+		ScreenshotPNG:    screenshotPNG,
 	}, nil
+}
+
+func normalizeLimits(limits Limits) Limits {
+	defaults := DefaultLimits()
+	if limits.Timeout <= 0 {
+		limits.Timeout = defaults.Timeout
+	}
+	if limits.DefaultMaxTextChars <= 0 {
+		limits.DefaultMaxTextChars = defaults.DefaultMaxTextChars
+	}
+	if limits.MaxAllowedTextChars <= 0 {
+		limits.MaxAllowedTextChars = defaults.MaxAllowedTextChars
+	}
+	if limits.DefaultMaxTextChars > limits.MaxAllowedTextChars {
+		limits.DefaultMaxTextChars = limits.MaxAllowedTextChars
+	}
+	if limits.MaxLinks <= 0 {
+		limits.MaxLinks = defaults.MaxLinks
+	}
+	if limits.MaxLinkTextChars <= 0 {
+		limits.MaxLinkTextChars = defaults.MaxLinkTextChars
+	}
+	if limits.MaxRedirects <= 0 {
+		limits.MaxRedirects = defaults.MaxRedirects
+	}
+	if limits.MaxScreenshotBytes <= 0 {
+		limits.MaxScreenshotBytes = defaults.MaxScreenshotBytes
+	}
+	return limits
+}
+
+func normalizeScreenshotMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), screenshotModeFullPage) {
+		return screenshotModeFullPage
+	}
+	return screenshotModeViewport
+}
+
+func extractContentFromHTML(renderedHTML, pageURL, fallbackText string) (content, contentFormat, extractionMethod string) {
+	fallbackText = strings.TrimSpace(fallbackText)
+	pageURL = strings.TrimSpace(pageURL)
+	if markdown, err := extractReadableMarkdown(renderedHTML, pageURL); err == nil {
+		return markdown, contentFormatMarkdown, extractionReadability
+	}
+	return fallbackText, contentFormatText, extractionInnerText
+}
+
+func extractReadableMarkdown(renderedHTML, pageURL string) (string, error) {
+	if strings.TrimSpace(renderedHTML) == "" {
+		return "", errors.New("rendered HTML is empty")
+	}
+	parsedURL, err := url.Parse(pageURL)
+	if err != nil || !parsedURL.IsAbs() {
+		return "", errors.New("page URL is invalid for extraction")
+	}
+	article, err := readability.FromReader(strings.NewReader(renderedHTML), parsedURL)
+	if err != nil {
+		return "", err
+	}
+	if article.Node == nil {
+		return "", errors.New("no readability content")
+	}
+	htmlContent := strings.Builder{}
+	if err := article.RenderHTML(&htmlContent); err != nil {
+		return "", err
+	}
+	rendered := strings.TrimSpace(htmlContent.String())
+	if rendered == "" {
+		return "", errors.New("readability content is empty")
+	}
+	markdown, err := htmltomarkdown.ConvertString(rendered, converter.WithDomain(parsedURL.String()))
+	if err != nil {
+		return "", err
+	}
+	markdown = strings.TrimSpace(markdown)
+	if !hasUsefulContent(markdown) {
+		return "", errors.New("markdown content is empty")
+	}
+	return markdown, nil
+}
+
+func hasUsefulContent(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	return strings.IndexFunc(content, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r)
+	}) >= 0
 }
 
 func clampString(value string, limit int) (string, bool) {

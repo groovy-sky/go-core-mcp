@@ -93,8 +93,10 @@ type CallToolParams struct {
 
 // Content is a single content block of a tool result.
 type Content struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
 }
 
 // CallToolResult is the outcome of a tool invocation.
@@ -105,11 +107,14 @@ type CallToolResult struct {
 
 // Text returns the concatenated text content blocks.
 func (r CallToolResult) Text() string {
-	if len(r.Content) == 1 {
+	if len(r.Content) == 1 && r.Content[0].Type == "text" {
 		return r.Content[0].Text
 	}
 	combined := ""
 	for _, block := range r.Content {
+		if block.Type != "text" {
+			continue
+		}
 		combined += block.Text
 	}
 	return combined
