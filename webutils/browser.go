@@ -442,29 +442,27 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromed
 	switch actionType {
 	case browserActionWaitVisible:
 		return []chromedp.Action{
-			wrapBrowserAction(index, actionType, selector, chromedp.WaitVisible(selector, chromedp.ByQuery)),
+			wrapBrowserAction(index, actionType, chromedp.WaitVisible(selector, chromedp.ByQuery)),
 		}, nil
 	case browserActionClick:
 		return []chromedp.Action{
-			wrapBrowserAction(index, actionType, selector,
+			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
 				chromedp.Click(selector, chromedp.ByQuery),
 			),
 		}, nil
 	case browserActionSetValue:
 		return []chromedp.Action{
-			wrapBrowserAction(index, actionType, selector,
+			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
 				chromedp.SetValue(selector, action.Value, chromedp.ByQuery),
 			),
 		}, nil
 	case browserActionType:
 		return []chromedp.Action{
-			wrapBrowserAction(index, actionType, selector,
+			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
-				chromedp.Focus(selector, chromedp.ByQuery),
-				chromedp.KeyEvent(kb.End),
-				chromedp.SendKeys(selector, action.Value, chromedp.ByQuery),
+				chromedp.SendKeys(selector, kb.End+action.Value, chromedp.ByQuery),
 			),
 		}, nil
 	default:
@@ -472,11 +470,11 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromed
 	}
 }
 
-func wrapBrowserAction(index int, actionType, selector string, actions ...chromedp.Action) chromedp.Action {
+func wrapBrowserAction(index int, actionType string, actions ...chromedp.Action) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		for _, action := range actions {
 			if err := action.Do(ctx); err != nil {
-				return fmt.Errorf("browser action %d (%s %q) failed: %w", index+1, actionType, selector, err)
+				return fmt.Errorf("browser action %d (%s) failed: %w", index+1, actionType, err)
 			}
 		}
 		return nil
