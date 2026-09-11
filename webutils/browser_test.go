@@ -560,6 +560,187 @@ func TestChromiumBrowserBrowseRejectsOversizedScreenshot(t *testing.T) {
 	}
 }
 
+func TestChromiumBrowserBrowseSetValueReplacesInputValue(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionSetValue, Selector: "#target-input", Value: "replaced value"},
+			{Type: browserActionClick, Selector: "#show-value"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if !strings.Contains(result.VisibleText, "replaced value") {
+		t.Fatalf("expected visible text to contain replaced value, got %q", result.VisibleText)
+	}
+	if strings.Contains(result.VisibleText, "seed value") {
+		t.Fatalf("expected set_value to replace the existing value, got %q", result.VisibleText)
+	}
+}
+
+func TestChromiumBrowserBrowseTypeAppendsText(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionType, Selector: "#target-input", Value: " plus more"},
+			{Type: browserActionClick, Selector: "#show-value"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if !strings.Contains(result.VisibleText, "seed value plus more") {
+		t.Fatalf("expected visible text to contain appended text, got %q", result.VisibleText)
+	}
+}
+
+func TestChromiumBrowserBrowseClickUpdatesRenderedDOM(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionClick, Selector: "#show-dom"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if !strings.Contains(result.VisibleText, "clicked state") {
+		t.Fatalf("expected visible text to contain clicked state, got %q", result.VisibleText)
+	}
+}
+
+func TestChromiumBrowserBrowseWaitVisibleWaitsForAsyncElement(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/wait"),
+		Actions: []BrowserAction{
+			{Type: browserActionWaitVisible, Selector: "#late-element"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if !strings.Contains(result.VisibleText, "late element ready") {
+		t.Fatalf("expected visible text to contain late element text, got %q", result.VisibleText)
+	}
+}
+
+func TestChromiumBrowserBrowseClickCanNavigateBeforeExtraction(t *testing.T) {
+	browser, server := newFixtureBrowser(t, DefaultLimits(), false, "allowed.example")
+
+	result, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionClick, Selector: "#go-next"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Browse returned error: %v", err)
+	}
+	if result.FinalURL != fixtureURL(t, server, "allowed.example", "/next-action") {
+		t.Fatalf("expected final URL %q, got %q", fixtureURL(t, server, "allowed.example", "/next-action"), result.FinalURL)
+	}
+	if !strings.Contains(result.VisibleText, "navigated page") {
+		t.Fatalf("expected extraction from navigated page, got %q", result.VisibleText)
+	}
+}
+
+func TestChromiumBrowserBrowseRejectsInvalidActions(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxActions = 1
+	limits.MaxSelectorChars = 8
+	limits.MaxActionValueChars = 6
+	browser := NewChromiumBrowser(limits)
+	browser.resolver = staticResolver{
+		records: map[string][]netip.Addr{
+			"example.com": {netip.MustParseAddr("93.184.216.34")},
+		},
+	}
+
+	testCases := []struct {
+		name        string
+		actions     []BrowserAction
+		wantMessage string
+		notContains []string
+	}{
+		{
+			name:        "unsupported action type",
+			actions:     []BrowserAction{{Type: "submit", Selector: "#target"}},
+			wantMessage: `unsupported browser action type "submit"`,
+		},
+		{
+			name:        "missing selector",
+			actions:     []BrowserAction{{Type: browserActionClick, Selector: " \t "}},
+			wantMessage: "browser action 1 (click) selector is required",
+		},
+		{
+			name:        "too many actions",
+			actions:     []BrowserAction{{Type: browserActionClick, Selector: "#first"}, {Type: browserActionClick, Selector: "#second"}},
+			wantMessage: "browser actions exceed the maximum count of 1",
+		},
+		{
+			name:        "selector too long",
+			actions:     []BrowserAction{{Type: browserActionClick, Selector: "#too-long-selector"}},
+			wantMessage: "browser action 1 (click) selector is too long",
+		},
+		{
+			name:        "value too long",
+			actions:     []BrowserAction{{Type: browserActionType, Selector: "#ok", Value: "toolongvalue"}},
+			wantMessage: "browser action 1 (type) value is too long",
+		},
+		{
+			name:        "value not allowed",
+			actions:     []BrowserAction{{Type: browserActionClick, Selector: "#ok", Value: "super-secret-password"}},
+			wantMessage: "browser action 1 (click) does not accept a value",
+			notContains: []string{"super-secret-password"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := browser.Browse(context.Background(), BrowseRequest{
+				URL:     "https://example.com",
+				Actions: tc.actions,
+			})
+			if err == nil {
+				t.Fatal("expected invalid action to fail")
+			}
+			if err.Error() != tc.wantMessage {
+				t.Fatalf("expected error %q, got %q", tc.wantMessage, err.Error())
+			}
+			for _, disallowed := range tc.notContains {
+				if strings.Contains(err.Error(), disallowed) {
+					t.Fatalf("expected error not to contain %q, got %q", disallowed, err.Error())
+				}
+			}
+		})
+	}
+}
+
+func TestChromiumBrowserBrowseMissingSelectorTimesOut(t *testing.T) {
+	limits := DefaultLimits()
+	limits.Timeout = 2 * time.Second
+	browser, server := newFixtureBrowser(t, limits, false, "allowed.example")
+
+	_, err := browser.Browse(context.Background(), BrowseRequest{
+		URL: fixtureURL(t, server, "allowed.example", "/actions/form"),
+		Actions: []BrowserAction{
+			{Type: browserActionWaitVisible, Selector: "#missing"},
+		},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded for missing selector, got %v", err)
+	}
+}
+
 func findChromeExecutable(t *testing.T) string {
 	t.Helper()
 
@@ -576,6 +757,24 @@ func findChromeExecutable(t *testing.T) string {
 	}
 	t.Skip("no Chrome/Chromium executable available for browser integration test")
 	return ""
+}
+
+func newFixtureBrowser(t *testing.T, limits Limits, includeBlockedScript bool, hosts ...string) (*ChromiumBrowser, *httptest.Server) {
+	t.Helper()
+
+	chromePath := findChromeExecutable(t)
+	server, _ := newBrowserFixtureServer(t, includeBlockedScript)
+	wrapperPath := makeChromeWrapper(t, chromePath, fixtureListenerIP(t, server), hosts...)
+	t.Setenv(chromeExecutableEnvVar, wrapperPath)
+	t.Setenv(chromeArgsEnvVar, "--no-sandbox --disable-dev-shm-usage")
+
+	browser := NewChromiumBrowser(limits)
+	resolver := staticResolver{records: make(map[string][]netip.Addr, len(hosts))}
+	for _, host := range hosts {
+		resolver.records[host] = []netip.Addr{netip.MustParseAddr("93.184.216.34")}
+	}
+	browser.resolver = resolver
+	return browser, server
 }
 
 func makeChromeWrapper(t *testing.T, chromePath, ip string, hosts ...string) string {
@@ -672,6 +871,15 @@ func newBrowserFixtureServer(t *testing.T, includeBlockedScript bool) (*httptest
 		case "/next":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Fixture Next</title></head><body>next page</body></html>`))
+		case "/actions/form":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Action Form</title></head><body><label for="target-input">Input</label><input id="target-input" value="seed value"><button id="show-value" type="button" onclick="document.getElementById('value-output').textContent = document.getElementById('target-input').value">Show value</button><button id="show-dom" type="button" onclick="document.getElementById('dom-output').textContent = 'clicked state'">Change DOM</button><a id="go-next" href="/next-action">Go next</a><div id="value-output">pending value</div><div id="dom-output">before click</div></body></html>`))
+		case "/actions/wait":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Wait Fixture</title></head><body><div>waiting for async content</div><script>window.setTimeout(function () { var element = document.createElement('div'); element.id = 'late-element'; element.textContent = 'late element ready'; document.body.appendChild(element); }, 150);</script></body></html>`))
+		case "/next-action":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<!doctype html><html><head><title>Action Next</title></head><body><main id="next-page">navigated page</main></body></html>`))
 		case "/blocked.js":
 			w.Header().Set("Content-Type", "application/javascript")
 			_, _ = w.Write([]byte(`window.blockedScriptLoaded = true;`))
