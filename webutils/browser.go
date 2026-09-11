@@ -288,7 +288,6 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		actions = append(actions, steps...)
 	}
 	actions = append(actions,
-		chromedp.WaitReady("html", chromedp.ByQuery),
 		chromedp.Location(&finalURL),
 		chromedp.Title(&title),
 		chromedp.Evaluate(`(() => (document.body ? document.body.innerText : ""))()`, &text),
@@ -454,6 +453,7 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromed
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
 				chromedp.Click(selector, chromedp.ByQuery),
+				waitForStablePage(),
 			),
 		}, nil
 	case browserActionSetValue:
@@ -484,6 +484,33 @@ func wrapBrowserAction(index int, actionType string, actions ...chromedp.Action)
 			}
 		}
 		return nil
+	})
+}
+
+func waitForStablePage() chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		var (
+			lastURL        string
+			lastReadyState string
+		)
+		for {
+			if err := chromedp.Sleep(100 * time.Millisecond).Do(ctx); err != nil {
+				return err
+			}
+			var currentURL string
+			if err := chromedp.Evaluate(`window.location.href || ""`, &currentURL).Do(ctx); err != nil {
+				return err
+			}
+			var readyState string
+			if err := chromedp.Evaluate(`document.readyState || ""`, &readyState).Do(ctx); err != nil {
+				return err
+			}
+			if readyState == "complete" && currentURL != "" && currentURL == lastURL && lastReadyState == "complete" {
+				return nil
+			}
+			lastURL = currentURL
+			lastReadyState = readyState
+		}
 	})
 }
 
