@@ -21,7 +21,6 @@ import (
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
-	"github.com/chromedp/chromedp/kb"
 	"golang.org/x/net/html"
 )
 
@@ -462,7 +461,8 @@ func chromedpActionsForBrowserAction(index int, action BrowserAction) ([]chromed
 		return []chromedp.Action{
 			wrapBrowserAction(index, actionType,
 				chromedp.WaitVisible(selector, chromedp.ByQuery),
-				chromedp.SendKeys(selector, kb.End+action.Value, chromedp.ByQuery),
+				chromedp.Focus(selector, chromedp.ByQuery),
+				chromedp.SendKeys(selector, action.Value, chromedp.ByQuery),
 			),
 		}, nil
 	default:
