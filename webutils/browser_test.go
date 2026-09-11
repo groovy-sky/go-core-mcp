@@ -424,7 +424,8 @@ func newBrowserFixtureServer(t *testing.T, includeBlockedScript bool) (*httptest
 		}
 	}))
 	t.Cleanup(server.Close)
-	_, blockedPort, err := net.SplitHostPort(server.Listener.Addr().String())
+	var err error
+	_, blockedPort, err = net.SplitHostPort(server.Listener.Addr().String())
 	if err != nil {
 		t.Fatalf("split fixture listener address: %v", err)
 	}
