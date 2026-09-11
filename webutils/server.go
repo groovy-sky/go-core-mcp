@@ -142,7 +142,7 @@ func inputSchema(limits Limits) map[string]any {
 							"type":        "string",
 							"description": "Browser action type.",
 							"minLength":   1,
-							"maxLength":   defaultMaxActionType,
+							"maxLength":   limits.MaxActionTypeChars,
 						},
 						"selector": map[string]any{
 							"type":        "string",

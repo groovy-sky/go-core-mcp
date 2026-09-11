@@ -90,6 +90,7 @@ type Limits struct {
 	MaxRedirects        int
 	MaxScreenshotBytes  int
 	MaxActions          int
+	MaxActionTypeChars  int
 	MaxSelectorChars    int
 	MaxActionValueChars int
 }
@@ -104,6 +105,7 @@ func DefaultLimits() Limits {
 		MaxRedirects:        8,
 		MaxScreenshotBytes:  defaultMaxScreenshotB,
 		MaxActions:          defaultMaxActions,
+		MaxActionTypeChars:  defaultMaxActionType,
 		MaxSelectorChars:    defaultMaxSelectorChars,
 		MaxActionValueChars: defaultMaxActionValue,
 	}
@@ -390,6 +392,9 @@ func normalizeLimits(limits Limits) Limits {
 	if limits.MaxActions <= 0 {
 		limits.MaxActions = defaults.MaxActions
 	}
+	if limits.MaxActionTypeChars <= 0 {
+		limits.MaxActionTypeChars = defaults.MaxActionTypeChars
+	}
 	if limits.MaxSelectorChars <= 0 {
 		limits.MaxSelectorChars = defaults.MaxSelectorChars
 	}
@@ -409,7 +414,7 @@ func validateBrowserActions(actions []BrowserAction, limits Limits) error {
 		if actionType == "" {
 			return fmt.Errorf("browser action %d type is required", i+1)
 		}
-		if len(action.Type) > defaultMaxActionType {
+		if len(action.Type) > limits.MaxActionTypeChars {
 			return fmt.Errorf("browser action %d type is too long", i+1)
 		}
 		selector := strings.TrimSpace(action.Selector)
