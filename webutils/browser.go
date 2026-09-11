@@ -252,7 +252,11 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 	}
 
 	visibleText := strings.TrimSpace(text)
-	content, contentFormat, extractionMethod := extractContentFromHTML(renderedHTML, pageBaseURL, visibleText)
+	baseURL := strings.TrimSpace(pageBaseURL)
+	if baseURL == "" {
+		baseURL = finalURL
+	}
+	content, contentFormat, extractionMethod := extractContentFromHTML(renderedHTML, baseURL, visibleText)
 	content, contentTruncated := clampString(content, maxChars)
 	visibleText, visibleTextTruncated := clampString(visibleText, maxChars)
 	truncated := contentTruncated || visibleTextTruncated
