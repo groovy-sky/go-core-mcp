@@ -37,6 +37,8 @@ const (
 const SystemPrompt = `You are a local assistant with access to coreutils tools.
 
 Use tools when workspace data or an exact calculation is required.
+When web tools are available, use search_web to discover sources before browse_url.
+Browse a few relevant links and synthesize from tool outputs.
 Never invent tool results.
 Call only listed tools.
 Use JSON arguments matching the tool schema.
@@ -49,7 +51,7 @@ var AllowedCoreTools = []string{
 }
 
 // AllowedWebTools are only considered when an explicit web MCP command is set.
-var AllowedWebTools = []string{"browse_url"}
+var AllowedWebTools = []string{"browse_url", "search_web"}
 
 // Config holds the validated CLI configuration.
 type Config struct {

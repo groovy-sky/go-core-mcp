@@ -23,8 +23,8 @@ var profiles = []struct {
 	keywords []string
 }{
 	{
-		profile:  Profile{Name: "web_browse", Tools: []string{"browse_url"}},
-		keywords: []string{"browse", "web", "website", "url", "https://", "http://", "page"},
+		profile:  Profile{Name: "web_browse", Tools: []string{"search_web", "browse_url"}},
+		keywords: []string{"browse", "web", "website", "url", "https://", "http://", "page", "search web", "search online", "current information", "latest"},
 	},
 	{
 		profile:  Profile{Name: "date", Tools: []string{"coreutils_run"}},
