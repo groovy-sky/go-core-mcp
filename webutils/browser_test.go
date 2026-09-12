@@ -198,6 +198,35 @@ func TestClampStringPreservesUTF8Runes(t *testing.T) {
 	}
 }
 
+func TestNormalizeSearchLinksFiltersAndBounds(t *testing.T) {
+	t.Parallel()
+
+	links, truncated := normalizeSearchLinks(context.Background(), staticResolver{
+		records: map[string][]netip.Addr{
+			"go.dev":          {netip.MustParseAddr("216.239.32.21")},
+			"pkg.go.dev":      {netip.MustParseAddr("216.239.36.21")},
+			"private.example": {netip.MustParseAddr("127.0.0.1")},
+		},
+	}, []map[string]string{
+		{"title": "Go", "url": "https://go.dev", "snippet": "The Go programming language", "source": "result"},
+		{"title": "Duplicate Go", "url": "https://go.dev", "snippet": "duplicate", "source": "result"},
+		{"title": "Private", "url": "https://private.example", "snippet": "blocked", "source": "result"},
+		{"title": "Pkg", "url": "https://pkg.go.dev", "snippet": strings.Repeat("x", 300), "source": "result"},
+	}, 2, 50)
+	if len(links) != 2 {
+		t.Fatalf("expected 2 links, got %d", len(links))
+	}
+	if links[0].URL != "https://go.dev" || links[0].Rank != 1 {
+		t.Fatalf("unexpected first link: %+v", links[0])
+	}
+	if links[1].URL != "https://pkg.go.dev" || links[1].Rank != 2 {
+		t.Fatalf("unexpected second link: %+v", links[1])
+	}
+	if !truncated {
+		t.Fatal("expected truncation due max results or snippet clamp")
+	}
+}
+
 func TestResolveChromeExecutableUsesConfiguredOverride(t *testing.T) {
 	t.Parallel()
 

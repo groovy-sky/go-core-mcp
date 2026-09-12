@@ -18,6 +18,7 @@ import (
 
 const (
 	toolNameBrowseURL = "browse_url"
+	toolNameSearchWeb = "search_web"
 )
 
 type Server struct {
@@ -40,7 +41,7 @@ func NewServer(limits Limits, browser Browser, logger *log.Logger) *Server {
 }
 
 func (s *Server) ToolNames() []string {
-	return []string{toolNameBrowseURL}
+	return []string{toolNameBrowseURL, toolNameSearchWeb}
 }
 
 func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
@@ -97,15 +98,22 @@ func (s *Server) dispatch(ctx context.Context, output io.Writer, request mcpprot
 
 func (s *Server) listTools() mcpproto.ListToolsResult {
 	return mcpproto.ListToolsResult{
-		Tools: []mcpproto.Tool{{
-			Name:        toolNameBrowseURL,
-			Description: "Browse one public HTTPS page with a fresh headless Chromium instance and return bounded extracted content, visible text, links, and optional screenshot.",
-			InputSchema: mustJSON(inputSchema()),
-		}},
+		Tools: []mcpproto.Tool{
+			{
+				Name:        toolNameBrowseURL,
+				Description: "Browse one public HTTPS page with a fresh headless Chromium instance and return bounded extracted content, visible text, links, and optional screenshot.",
+				InputSchema: mustJSON(inputSchemaBrowse()),
+			},
+			{
+				Name:        toolNameSearchWeb,
+				Description: "Search the public web with DuckDuckGo and return bounded, policy-validated result links with snippets for follow-up browsing.",
+				InputSchema: mustJSON(inputSchemaSearch()),
+			},
+		},
 	}
 }
 
-func inputSchema() map[string]any {
+func inputSchemaBrowse() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -136,6 +144,33 @@ func inputSchema() map[string]any {
 	}
 }
 
+func inputSchemaSearch() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{
+				"type":        "string",
+				"description": "Search query text.",
+				"minLength":   1,
+				"maxLength":   maxSearchQueryRunes,
+			},
+			"max_results": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of search results to return.",
+				"minimum":     1,
+				"maximum":     maxAllowedSearchResults,
+			},
+			"engine": map[string]any{
+				"type":        "string",
+				"description": "Search engine identifier.",
+				"enum":        []any{searchEngineDuckDuckGo},
+			},
+		},
+		"required":             []any{"query"},
+		"additionalProperties": false,
+	}
+}
+
 func mustJSON(value any) json.RawMessage {
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -149,45 +184,72 @@ func (s *Server) callTool(ctx context.Context, raw json.RawMessage) mcpproto.Cal
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return errorResult(mcpproto.ErrorInvalidArguments, "tool call parameters are not a JSON object")
 	}
-	if params.Name != toolNameBrowseURL {
-		return errorResult(mcpproto.ErrorUnknownTool, "tool is not available")
-	}
-	arguments, err := jsonschema.ValidateRaw(inputSchema(), params.Arguments)
-	if err != nil {
-		return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
-	}
-	request := BrowseRequest{
-		URL:               arguments["url"].(string),
-		MaxTextChars:      optionalInt(arguments, "max_text_chars"),
-		CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
-		ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
-	}
-	result, err := s.browser.Browse(ctx, request)
-	if err != nil {
-		category, message := classifyError(err)
-		return errorResult(category, message)
-	}
-	body := map[string]any{
-		"success":           true,
-		"final_url":         result.FinalURL,
-		"title":             result.Title,
-		"content":           result.Content,
-		"content_format":    result.ContentFormat,
-		"extraction_method": result.ExtractionMethod,
-		"visible_text":      result.VisibleText,
-		"links":             result.Links,
-		"truncated":         result.Truncated,
-	}
-	content := []mcpproto.Content{{Type: "text", Text: encode(body)}}
-	if len(result.ScreenshotPNG) > 0 {
-		content = append(content, mcpproto.Content{
-			Type:     "image",
-			Data:     base64.StdEncoding.EncodeToString(result.ScreenshotPNG),
-			MIMEType: "image/png",
+	switch params.Name {
+	case toolNameBrowseURL:
+		arguments, err := jsonschema.ValidateRaw(inputSchemaBrowse(), params.Arguments)
+		if err != nil {
+			return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
+		}
+		request := BrowseRequest{
+			URL:               arguments["url"].(string),
+			MaxTextChars:      optionalInt(arguments, "max_text_chars"),
+			CaptureScreenshot: optionalBool(arguments, "capture_screenshot"),
+			ScreenshotMode:    optionalString(arguments, "screenshot_mode"),
+		}
+		result, err := s.browser.Browse(ctx, request)
+		if err != nil {
+			category, message := classifyError(err)
+			return errorResult(category, message)
+		}
+		body := map[string]any{
+			"success":           true,
+			"final_url":         result.FinalURL,
+			"title":             result.Title,
+			"content":           result.Content,
+			"content_format":    result.ContentFormat,
+			"extraction_method": result.ExtractionMethod,
+			"visible_text":      result.VisibleText,
+			"links":             result.Links,
+			"truncated":         result.Truncated,
+		}
+		content := []mcpproto.Content{{Type: "text", Text: encode(body)}}
+		if len(result.ScreenshotPNG) > 0 {
+			content = append(content, mcpproto.Content{
+				Type:     "image",
+				Data:     base64.StdEncoding.EncodeToString(result.ScreenshotPNG),
+				MIMEType: "image/png",
+			})
+		}
+		return mcpproto.CallToolResult{Content: content}
+	case toolNameSearchWeb:
+		arguments, err := jsonschema.ValidateRaw(inputSchemaSearch(), params.Arguments)
+		if err != nil {
+			return errorResult(mcpproto.ErrorInvalidArguments, err.Error())
+		}
+		result, err := s.browser.Search(ctx, SearchRequest{
+			Query:      arguments["query"].(string),
+			MaxResults: optionalInt(arguments, "max_results"),
+			Engine:     optionalString(arguments, "engine"),
 		})
-	}
-	return mcpproto.CallToolResult{
-		Content: content,
+		if err != nil {
+			category, message := classifyError(err)
+			return errorResult(category, message)
+		}
+		body := map[string]any{
+			"success":      true,
+			"engine":       result.Engine,
+			"query":        result.Query,
+			"final_url":    result.FinalURL,
+			"title":        result.Title,
+			"results":      result.Results,
+			"visible_text": result.VisibleText,
+			"truncated":    result.Truncated,
+		}
+		return mcpproto.CallToolResult{
+			Content: []mcpproto.Content{{Type: "text", Text: encode(body)}},
+		}
+	default:
+		return errorResult(mcpproto.ErrorUnknownTool, "tool is not available")
 	}
 }
 
@@ -217,7 +279,7 @@ func classifyError(err error) (string, string) {
 		return mcpproto.ErrorToolError, "tool execution failed"
 	}
 	switch {
-	case errors.Is(err, errURLRequired), errors.Is(err, errURLTooLong), errors.Is(err, errURLMustBeHTTPS), errors.Is(err, errURLHostRequired), errors.Is(err, errURLUserinfoNotAllowed):
+	case errors.Is(err, errURLRequired), errors.Is(err, errURLTooLong), errors.Is(err, errURLMustBeHTTPS), errors.Is(err, errURLHostRequired), errors.Is(err, errURLUserinfoNotAllowed), errors.Is(err, errSearchQueryRequired), errors.Is(err, errSearchEngineUnsupported):
 		return "invalid_url", err.Error()
 	case errors.Is(err, errHostNotPublic), errors.Is(err, errHostNoPublicAddress):
 		return "disallowed_destination", err.Error()

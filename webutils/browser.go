@@ -30,6 +30,9 @@ const (
 	maxAllowedTextChars     = 12000
 	defaultMaxLinks         = 40
 	defaultMaxLinkTextChars = 200
+	defaultMaxSearchResults = 5
+	maxAllowedSearchResults = 10
+	maxSearchQueryRunes     = 300
 	defaultMaxScreenshotB   = 1 << 20
 	chromeExecutableEnvVar  = "WEBUTILS_CHROME_EXECUTABLE"
 	chromeArgsEnvVar        = "WEBUTILS_CHROME_ARGS"
@@ -41,6 +44,7 @@ const (
 	extractionReadability   = "readability_markdown"
 	extractionRenderedDOM   = "rendered_dom_markdown"
 	extractionInnerText     = "inner_text"
+	searchEngineDuckDuckGo  = "duckduckgo"
 )
 
 const (
@@ -76,6 +80,8 @@ type Limits struct {
 	MaxAllowedTextChars int
 	MaxLinks            int
 	MaxLinkTextChars    int
+	DefaultMaxResults   int
+	MaxSearchResults    int
 	MaxRedirects        int
 	MaxScreenshotBytes  int
 }
@@ -87,6 +93,8 @@ func DefaultLimits() Limits {
 		MaxAllowedTextChars: maxAllowedTextChars,
 		MaxLinks:            defaultMaxLinks,
 		MaxLinkTextChars:    defaultMaxLinkTextChars,
+		DefaultMaxResults:   defaultMaxSearchResults,
+		MaxSearchResults:    maxAllowedSearchResults,
 		MaxRedirects:        8,
 		MaxScreenshotBytes:  defaultMaxScreenshotB,
 	}
@@ -100,8 +108,10 @@ type BrowseRequest struct {
 }
 
 type Link struct {
-	Text string `json:"text"`
-	URL  string `json:"url"`
+	Text   string `json:"text"`
+	URL    string `json:"url"`
+	Rank   int    `json:"rank,omitempty"`
+	Source string `json:"source,omitempty"`
 }
 
 type BrowseResult struct {
@@ -116,8 +126,25 @@ type BrowseResult struct {
 	ScreenshotPNG    []byte `json:"-"`
 }
 
+type SearchRequest struct {
+	Query      string
+	MaxResults int
+	Engine     string
+}
+
+type SearchResult struct {
+	Engine      string `json:"engine"`
+	Query       string `json:"query"`
+	FinalURL    string `json:"final_url"`
+	Title       string `json:"title"`
+	Results     []Link `json:"results"`
+	VisibleText string `json:"visible_text"`
+	Truncated   bool   `json:"truncated"`
+}
+
 type Browser interface {
 	Browse(ctx context.Context, req BrowseRequest) (BrowseResult, error)
+	Search(ctx context.Context, req SearchRequest) (SearchResult, error)
 }
 
 type ChromiumBrowser struct {
@@ -130,6 +157,8 @@ func NewChromiumBrowser(limits Limits) *ChromiumBrowser {
 }
 
 var errScreenshotTooLarge = errors.New("screenshot exceeds maximum byte limit")
+var errSearchQueryRequired = errors.New("search query is required")
+var errSearchEngineUnsupported = errors.New("search engine is not supported")
 
 func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (BrowseResult, error) {
 	limits := normalizeLimits(b.limits)
@@ -308,7 +337,7 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		}
 		linkText, linkTextTruncated := clampString(strings.TrimSpace(item["text"]), limits.MaxLinkTextChars)
 		truncated = truncated || linkTextTruncated
-		links = append(links, Link{Text: linkText, URL: linkURL})
+		links = append(links, Link{Text: linkText, URL: linkURL, Rank: len(links) + 1, Source: "page_anchor"})
 	}
 
 	return BrowseResult{
@@ -322,6 +351,274 @@ func (b *ChromiumBrowser) Browse(ctx context.Context, req BrowseRequest) (Browse
 		Truncated:        truncated,
 		ScreenshotPNG:    screenshotPNG,
 	}, nil
+}
+
+func (b *ChromiumBrowser) Search(ctx context.Context, req SearchRequest) (SearchResult, error) {
+	limits := normalizeLimits(b.limits)
+	query := strings.TrimSpace(req.Query)
+	if query == "" {
+		return SearchResult{}, errSearchQueryRequired
+	}
+	if len([]rune(query)) > maxSearchQueryRunes {
+		runes := []rune(query)
+		query = string(runes[:maxSearchQueryRunes])
+	}
+	engine := normalizeSearchEngine(req.Engine)
+	if engine == "" {
+		return SearchResult{}, errSearchEngineUnsupported
+	}
+	maxResults := req.MaxResults
+	if maxResults <= 0 {
+		maxResults = limits.DefaultMaxResults
+	}
+	if maxResults > limits.MaxSearchResults {
+		maxResults = limits.MaxSearchResults
+	}
+	searchURL, err := searchURLForQuery(engine, query)
+	if err != nil {
+		return SearchResult{}, err
+	}
+
+	targetURL, err := validateAndResolveURL(ctx, b.resolver, searchURL)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	execPath, err := resolveChromeExecutablePath()
+	if err != nil {
+		return SearchResult{}, err
+	}
+	execOptions, err := resolveChromeArgs()
+	if err != nil {
+		return SearchResult{}, err
+	}
+
+	profileDir, err := os.MkdirTemp("", "webutils-chromium-*")
+	if err != nil {
+		return SearchResult{}, fmt.Errorf("create browser profile: %w", err)
+	}
+	defer os.RemoveAll(profileDir)
+
+	timeout := limits.Timeout
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	allocatorOptions := append([]chromedp.ExecAllocatorOption{chromedp.ExecPath(execPath)}, chromedp.DefaultExecAllocatorOptions[:]...)
+	allocatorOptions = append(allocatorOptions,
+		chromedp.UserDataDir(profileDir),
+		chromedp.Headless,
+		chromedp.DisableGPU,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.NoFirstRun,
+	)
+	allocatorOptions = append(allocatorOptions, execOptions...)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(runCtx, allocatorOptions...)
+	defer allocCancel()
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
+	defer browserCancel()
+
+	var (
+		redirects   int
+		redirectMtx sync.Mutex
+		checkErr    error
+		checkErrMtx sync.Mutex
+	)
+	setCheckErr := func(err error) {
+		if err == nil {
+			return
+		}
+		checkErrMtx.Lock()
+		defer checkErrMtx.Unlock()
+		if checkErr == nil {
+			checkErr = err
+			browserCancel()
+		}
+	}
+	getCheckErr := func() error {
+		checkErrMtx.Lock()
+		defer checkErrMtx.Unlock()
+		return checkErr
+	}
+
+	chromedp.ListenTarget(browserCtx, func(event any) {
+		switch typed := event.(type) {
+		case *network.EventRequestWillBeSent:
+			if typed.RedirectResponse != nil {
+				redirectMtx.Lock()
+				redirects++
+				tooMany := redirects > limits.MaxRedirects
+				redirectMtx.Unlock()
+				if tooMany {
+					setCheckErr(errors.New("redirect limit exceeded"))
+				}
+			}
+		case *fetch.EventRequestPaused:
+			go func(evt *fetch.EventRequestPaused) {
+				requestURL := strings.TrimSpace(evt.Request.URL)
+				if _, err := validateAndResolveURL(browserCtx, b.resolver, requestURL); err != nil {
+					if failErr := chromedp.Run(browserCtx, fetch.FailRequest(evt.RequestID, network.ErrorReasonBlockedByClient)); failErr != nil {
+						setCheckErr(fmt.Errorf("fail request: %w", failErr))
+						return
+					}
+					setCheckErr(fmt.Errorf("blocked request %q: %w", requestURL, err))
+					return
+				}
+				if err := chromedp.Run(browserCtx, fetch.ContinueRequest(evt.RequestID)); err != nil {
+					setCheckErr(fmt.Errorf("continue request: %w", err))
+				}
+			}(typed)
+		}
+	})
+
+	if err := chromedp.Run(browserCtx,
+		network.Enable(),
+		fetch.Enable().WithPatterns([]*fetch.RequestPattern{{URLPattern: "*", RequestStage: fetch.RequestStageRequest}}),
+	); err != nil {
+		return SearchResult{}, fmt.Errorf("enable browser interception: %w", err)
+	}
+
+	var (
+		finalURL    string
+		title       string
+		visibleText string
+		rawResults  []map[string]string
+	)
+	actions := []chromedp.Action{
+		chromedp.Navigate(targetURL.String()),
+		chromedp.Location(&finalURL),
+		chromedp.Title(&title),
+		chromedp.Evaluate(`(() => (document.body ? document.body.innerText : ""))()`, &visibleText),
+		chromedp.Evaluate(`(() => {
+			const out = [];
+			const seen = new Set();
+			const push = (title, url, snippet, source) => {
+				const normalizedURL = (url || "").trim();
+				if (!normalizedURL || seen.has(normalizedURL)) return;
+				seen.add(normalizedURL);
+				out.push({
+					title: (title || "").trim(),
+					url: normalizedURL,
+					snippet: (snippet || "").trim(),
+					source: (source || "unknown").trim(),
+				});
+			};
+			const cardSelectors = [
+				'article',
+				'.result',
+				'.result__body',
+				'[data-testid="result"]',
+				'.web-result',
+			];
+			for (const selector of cardSelectors) {
+				for (const card of document.querySelectorAll(selector)) {
+					const anchor = card.querySelector('a[href]');
+					if (!anchor) continue;
+					const heading = card.querySelector('h1, h2, h3, h4');
+					const snippetEl = card.querySelector('p, .snippet, .result__snippet, [data-testid="result-snippet"]');
+					push(heading ? heading.innerText : anchor.innerText, anchor.href, snippetEl ? snippetEl.innerText : "", selector);
+				}
+			}
+			for (const anchor of document.querySelectorAll('h3 a[href], h2 a[href], .result__a[href], a[data-testid="result-title-a"]')) {
+				const parent = anchor.closest('article, .result, .result__body, [data-testid="result"], .web-result');
+				const snippetEl = parent ? parent.querySelector('p, .snippet, .result__snippet, [data-testid="result-snippet"]') : null;
+				push(anchor.innerText, anchor.href, snippetEl ? snippetEl.innerText : "", "heading_anchor");
+			}
+			return out;
+		})()`, &rawResults),
+	}
+	if err := chromedp.Run(browserCtx, actions...); err != nil {
+		if blocked := getCheckErr(); blocked != nil {
+			return SearchResult{}, blocked
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(browserCtx.Err(), context.DeadlineExceeded) {
+			return SearchResult{}, context.DeadlineExceeded
+		}
+		return SearchResult{}, fmt.Errorf("navigation failed: %w", err)
+	}
+	if blocked := getCheckErr(); blocked != nil {
+		return SearchResult{}, blocked
+	}
+	if _, err := validateAndResolveURL(ctx, b.resolver, finalURL); err != nil {
+		return SearchResult{}, fmt.Errorf("final destination is not allowed: %w", err)
+	}
+	results, resultsTruncated := normalizeSearchLinks(ctx, b.resolver, rawResults, maxResults, limits.MaxLinkTextChars)
+	visibleText, textTruncated := clampString(strings.TrimSpace(visibleText), limits.MaxAllowedTextChars)
+	return SearchResult{
+		Engine:      engine,
+		Query:       query,
+		FinalURL:    finalURL,
+		Title:       strings.TrimSpace(title),
+		Results:     results,
+		VisibleText: visibleText,
+		Truncated:   resultsTruncated || textTruncated,
+	}, nil
+}
+
+func normalizeSearchEngine(engine string) string {
+	normalized := strings.ToLower(strings.TrimSpace(engine))
+	if normalized == "" {
+		return searchEngineDuckDuckGo
+	}
+	switch normalized {
+	case searchEngineDuckDuckGo:
+		return searchEngineDuckDuckGo
+	default:
+		return ""
+	}
+}
+
+func searchURLForQuery(engine, query string) (string, error) {
+	switch engine {
+	case searchEngineDuckDuckGo:
+		encoded := url.QueryEscape(strings.TrimSpace(query))
+		return "https://duckduckgo.com/html/?q=" + encoded, nil
+	default:
+		return "", errSearchEngineUnsupported
+	}
+}
+
+func normalizeSearchLinks(ctx context.Context, resolver policyResolver, raw []map[string]string, maxResults int, maxTextChars int) ([]Link, bool) {
+	links := make([]Link, 0, maxResults)
+	seen := map[string]struct{}{}
+	truncated := false
+	for _, item := range raw {
+		if len(links) >= maxResults {
+			truncated = true
+			break
+		}
+		linkURL := strings.TrimSpace(item["url"])
+		if linkURL == "" {
+			continue
+		}
+		if _, exists := seen[linkURL]; exists {
+			continue
+		}
+		if _, err := validateAndResolveURL(ctx, resolver, linkURL); err != nil {
+			continue
+		}
+		seen[linkURL] = struct{}{}
+		title, titleTruncated := clampString(strings.TrimSpace(item["title"]), maxTextChars)
+		snippet, snippetTruncated := clampString(strings.TrimSpace(item["snippet"]), maxTextChars)
+		source, _ := clampString(strings.TrimSpace(item["source"]), 40)
+		text := strings.TrimSpace(title)
+		if snippet != "" {
+			if text != "" {
+				text += " — " + snippet
+			} else {
+				text = snippet
+			}
+		}
+		if text == "" {
+			text = linkURL
+		}
+		truncated = truncated || titleTruncated || snippetTruncated
+		links = append(links, Link{
+			Text:   text,
+			URL:    linkURL,
+			Rank:   len(links) + 1,
+			Source: source,
+		})
+	}
+	return links, truncated
 }
 
 func normalizeLimits(limits Limits) Limits {
@@ -343,6 +640,15 @@ func normalizeLimits(limits Limits) Limits {
 	}
 	if limits.MaxLinkTextChars <= 0 {
 		limits.MaxLinkTextChars = defaults.MaxLinkTextChars
+	}
+	if limits.DefaultMaxResults <= 0 {
+		limits.DefaultMaxResults = defaults.DefaultMaxResults
+	}
+	if limits.MaxSearchResults <= 0 {
+		limits.MaxSearchResults = defaults.MaxSearchResults
+	}
+	if limits.DefaultMaxResults > limits.MaxSearchResults {
+		limits.DefaultMaxResults = limits.MaxSearchResults
 	}
 	if limits.MaxRedirects <= 0 {
 		limits.MaxRedirects = defaults.MaxRedirects

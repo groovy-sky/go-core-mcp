@@ -113,8 +113,10 @@ It also exposes bounded workspace tools:
 - file management: `touch`, `write_file`, `mkdir`, `cp`, `mv`, `rm`, and `rmdir`
 
 When `webutils-mcp` is explicitly enabled and allowlisted, the agent can also
-expose `browse_url` (closed schema: `url`, optional `max_text_chars`,
-`capture_screenshot`, and `screenshot_mode`).
+expose:
+- `search_web` (closed schema: `query`, optional `max_results`, `engine`)
+- `browse_url` (closed schema: `url`, optional `max_text_chars`,
+  `capture_screenshot`, and `screenshot_mode`)
 
 `cat` is the bounded "print file content" tool. `grep` supports searching either
 one workspace file (`path`) or supplied text (`text`) and always returns bounded
@@ -373,7 +375,7 @@ srv setup: Added 17 MCP tools
 ```
 
 The tools appear in the built-in Web UI as `coreutils_*` and (when enabled)
-`webutils_browse_url`.
+`webutils_search_web` / `webutils_browse_url`.
 
 Usage and limitations:
 
@@ -618,8 +620,17 @@ Agent CLI flags (`cmd/agent`):
   requests must carry a matching bearer authorization header; if unset,
   the server logs a warning and accepts unauthenticated requests.
 
-`webutils-mcp` (`cmd/webutils-mcp`) serves only stdio MCP and exposes a
-single closed-schema tool:
+`webutils-mcp` (`cmd/webutils-mcp`) serves only stdio MCP and exposes closed-schema tools:
+
+- `search_web` arguments:
+  - `query` (required, bounded)
+  - `max_results` (optional, bounded)
+  - `engine` (optional, currently `duckduckgo`)
+- `search_web` returns:
+  - structured text metadata (`engine`, `query`, `final_url`, `title`,
+    `results`, `visible_text`, `truncated`)
+  - result links are policy-validated HTTPS/public destinations suitable for
+    follow-up `browse_url` calls
 
 - `browse_url` arguments:
   - `url` (required, HTTPS only)
@@ -632,6 +643,8 @@ single closed-schema tool:
     `truncated`) as an MCP text content block
   - optional PNG screenshot as a separate MCP image content block when
     `capture_screenshot` is true
+- current webutils behavior is deterministic URL navigation; it does not
+  expose arbitrary click/type interaction primitives.
 - `WEBUTILS_CHROME_EXECUTABLE` (default unset outside Docker): optional absolute
   Chrome/Chromium executable override. The bundled container image sets it to
   `/usr/bin/chromium`, which wraps the bundled Debian Chromium payload and its

@@ -94,6 +94,11 @@ func TestSelectProfileIsDeterministic(t *testing.T) {
 		if profile.Name != expected {
 			t.Errorf("prompt %q selected %q, expected %q", prompt, profile.Name, expected)
 		}
+		if expected == "web_browse" {
+			if len(profile.Tools) < 2 || profile.Tools[0] != "search_web" || profile.Tools[1] != "browse_url" {
+				t.Errorf("web_browse profile tools mismatch: %+v", profile.Tools)
+			}
+		}
 		if len(profile.Tools) > MaxExposedTools {
 			t.Errorf("profile %q exposes %d tools", profile.Name, len(profile.Tools))
 		}
@@ -131,10 +136,16 @@ func TestFilterDiscoveredDeniesUnexpectedTools(t *testing.T) {
 
 func TestFilterDiscoveredAllowsWebToolOnlyInWebAllowlist(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object"}`)
-	tools := []mcpproto.Tool{{Name: "browse_url", InputSchema: schema}}
+	tools := []mcpproto.Tool{
+		{Name: "browse_url", InputSchema: schema},
+		{Name: "search_web", InputSchema: schema},
+	}
 	kept := FilterDiscovered(tools, AllowedWebTools, nil)
 	if _, ok := kept["browse_url"]; !ok {
 		t.Fatal("browse_url must be allowed in the explicit web allowlist")
+	}
+	if _, ok := kept["search_web"]; !ok {
+		t.Fatal("search_web must be allowed in the explicit web allowlist")
 	}
 }
 
